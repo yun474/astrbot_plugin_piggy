@@ -181,10 +181,10 @@
     "hint": "超过时间重新上传；QQ 明确报告图片转存失败时也会重新上传一次。应小于图床链接有效期。"
   },
   "command_prefix": {
-    "description": "快捷按钮指令前缀",
+    "description": "快捷指令唤醒词",
     "type": "string",
-    "default": "/",
-    "hint": "应与 AstrBot 唤醒前缀一致，默认 /。群聊按官方规则填入输入框后由用户发送。"
+    "default": "",
+    "hint": "可选，默认留空：QQ 自动插入 @机器人，后面直接接命令。填写 /、! 或自定义唤醒词时会原样加在命令前；需要分隔空格时请一并填写。应与 AstrBot 配置一致。旧配置已保存的 / 可手动清空。"
   },
   "temp_cache_hours": {
     "description": "临时卡片 URL 缓存（小时）",

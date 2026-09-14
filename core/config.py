@@ -54,7 +54,7 @@ class Settings:
     request_timeout: float = 20.0
     backup_keep: int = 7
     cache_ttl_hours: int = 168
-    command_prefix: str = "/"
+    command_prefix: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -108,8 +108,8 @@ class Settings:
             raise PiggyError("上传请求头必须为字符串键值对。")
         if any(not isinstance(v, (str, int, float, bool)) for v in obj.upload_fields.values()):
             raise PiggyError("上传表单字段只能填写字符串或数值。")
-        if any(c in obj.command_prefix for c in "\r\n") or len(obj.command_prefix) > 8:
-            raise PiggyError("指令前缀长度不能超过 8，且不能包含换行。")
+        if any(c in obj.command_prefix for c in "\r\n") or len(obj.command_prefix) > 64:
+            raise PiggyError("快捷指令唤醒词长度不能超过 64，且不能包含换行。")
         return obj
 
     def use_host(self, command: str) -> bool:

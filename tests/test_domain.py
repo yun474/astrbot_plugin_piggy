@@ -241,7 +241,7 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
             Settings(display={"atlas": True}), self.root, self.user, progress, 2, True
         )
         self.assertEqual(
-            last.keyboard["content"]["rows"][-1]["buttons"][0]["action"]["data"], "/小猪图鉴 1"
+            last.keyboard["content"]["rows"][-1]["buttons"][0]["action"]["data"], "小猪图鉴 1"
         )
 
     async def test_all_bundled_assets_validate_and_existing_catalog_is_preserved(self):
@@ -369,12 +369,34 @@ class ConfigAndButtonsTests(unittest.TestCase):
                 Settings.from_dict({"image_retry_count": bad})
 
     def test_button_owner_prefix_and_navigation(self):
-        board = keyboard(Settings(command_prefix="!"), "member", "小猪图鉴", 2, 3)
-        rows = board["content"]["rows"]
-        self.assertEqual(rows[0]["buttons"][0]["action"]["data"], "!今日小猪")
-        for button in rows[-1]["buttons"]:
-            self.assertEqual(button["action"]["permission"]["specify_user_ids"], ["member"])
-            self.assertNotIn("enter", button["action"])
+        for config, prefix in (
+            ({}, ""),
+            ({"command_prefix": ""}, ""),
+            ({"command_prefix": "/"}, "/"),
+            ({"command_prefix": "!"}, "!"),
+            ({"command_prefix": "云云 "}, "云云 "),
+        ):
+            board = keyboard(Settings.from_dict(config), "member", "小猪图鉴", 2, 3)
+            rows = board["content"]["rows"]
+            actions = [b["action"] for row in rows for b in row["buttons"]]
+            self.assertEqual(
+                [a["data"] for a in actions],
+                [
+                    prefix + c
+                    for c in (
+                        "今日小猪",
+                        "小猪图鉴",
+                        "小猪排行",
+                        "我的猪圈",
+                        "小猪图鉴 1",
+                        "小猪图鉴 3",
+                    )
+                ],
+            )
+            self.assertTrue(all(a["type"] == 2 for a in actions))
+            for button in rows[-1]["buttons"]:
+                self.assertEqual(button["action"]["permission"]["specify_user_ids"], ["member"])
+                self.assertNotIn("enter", button["action"])
         self.assertNotIn("{{image:0}}", md("{{image:0}}"))
 
 
