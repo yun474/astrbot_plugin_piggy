@@ -6,10 +6,16 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import boto3
 from aiohttp import web
+from botocore.exceptions import (
+    EndpointConnectionError,
+    ParamValidationError,
+    ProxyConnectionError,
+    SSLError,
+)
 from botocore.stub import Stubber
 
 from core.config import PiggyError, Settings
@@ -272,6 +278,94 @@ class HttpAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class S3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_sdk_failures_keep_reason_stage_and_redact_credentials(self):
+        cfg = settings(access_key="ACCESS_PRIVATE", secret_key="SECRET_PRIVATE")
+        cases = [
+            (
+                SSLError(endpoint_url=cfg.endpoint, error="CERTIFICATE_VERIFY_FAILED"),
+                False,
+                "TLS/SSL",
+            ),
+            (
+                SSLError(endpoint_url=cfg.endpoint, error="EOF occurred in violation of protocol"),
+                True,
+                "TLS/SSL",
+            ),
+            (
+                ProxyConnectionError(proxy_url="http://proxy-user:proxy-password@proxy.local:8080"),
+                True,
+                "代理",
+            ),
+            (ParamValidationError(report='Invalid bucket "SECRET_PRIVATE"'), False, "参数校验"),
+            (
+                EndpointConnectionError(
+                    endpoint_url=cfg.endpoint, error=OSError("DNS resolution failed")
+                ),
+                True,
+                "网络",
+            ),
+        ]
+        for error, retryable, hint in cases:
+            host = S3Host(cfg)
+            host.client = Mock()
+            host.client.put_object.side_effect = error
+            with self.assertRaises(UploadError) as raised:
+                await host.upload(b"image", "piggy/a.png", "image/png")
+            failure = raised.exception
+            self.assertEqual(failure.retryable, retryable)
+            self.assertIn(hint, str(failure))
+            self.assertIn(type(error).__name__, failure.diagnostic)
+            self.assertIn("stage=put_object", failure.diagnostic)
+            self.assertIn("botocore=", failure.diagnostic)
+            for secret in ("ACCESS_PRIVATE", "SECRET_PRIVATE", "proxy-user", "proxy-password"):
+                self.assertNotIn(secret, failure.diagnostic)
+            if isinstance(error, EndpointConnectionError):
+                self.assertIn("DNS resolution failed", failure.diagnostic)
+        with patch(
+            "boto3.client", side_effect=TypeError("unexpected keyword request_checksum_calculation")
+        ):
+            with self.assertRaises(UploadError) as raised:
+                await S3Host(cfg).upload(b"image", "a.png", "image/png")
+            self.assertIn("stage=create_client", raised.exception.diagnostic)
+            self.assertIn("request_checksum_calculation", raised.exception.diagnostic)
+
+    async def test_real_s3_http_request_and_xml_error_keep_service_code(self):
+        requests = []
+
+        async def upload(request):
+            requests.append((request.path, await request.read(), dict(request.headers)))
+            return web.Response(
+                status=403,
+                text="<Error><Code>SignatureDoesNotMatch</Code><Message>signature invalid</Message><RequestId>r2-request-123</RequestId></Error>",
+                headers={"x-amz-request-id": "r2-request-123"},
+                content_type="application/xml",
+            )
+
+        app = web.Application()
+        app.router.add_put("/{path:.*}", upload)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        host = S3Host(settings(endpoint=f"http://127.0.0.1:{port}"))
+        try:
+            # Local protocol fixture only; production Settings.check_host requires HTTPS.
+            with patch.dict("os.environ", {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+                with self.assertRaises(UploadError) as raised:
+                    await host.upload(b"image", "piggy/a.png", "image/png")
+            self.assertIn("SignatureDoesNotMatch", str(raised.exception))
+            self.assertIn("request_id=r2-request-123", raised.exception.diagnostic)
+            self.assertIn("http_status=403", raised.exception.diagnostic)
+            self.assertFalse(raised.exception.retryable)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0][:2], ("/pigs/piggy/a.png", b"image"))
+            self.assertIn("AWS4-HMAC-SHA256", requests[0][2]["Authorization"])
+            self.assertNotIn("x-amz-acl", {k.lower() for k in requests[0][2]})
+        finally:
+            await host.close()
+            await runner.cleanup()
+
     async def test_r2_client_disables_hidden_retries_and_uses_auto_region(self):
         host = S3Host(settings())
         client = boto3.client(

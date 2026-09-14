@@ -51,6 +51,9 @@ class Settings:
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
         values = {key: data[key] for key in cls.__dataclass_fields__ if key in data}
+        for key in ("endpoint", "bucket", "access_key", "secret_key", "region", "public_base_url"):
+            if isinstance(values.get(key), str):
+                values[key] = values[key].strip()
         for key in ("upload_headers", "upload_fields", "success_value"):
             if isinstance(values.get(key), str):
                 try:
@@ -100,18 +103,26 @@ class Settings:
 
     def check_host(self) -> None:
         if self.provider == "s3":
-            if not all(
-                (
-                    self.endpoint,
-                    self.bucket,
-                    self.access_key,
-                    self.secret_key,
-                    self.public_base_url,
+            missing = [
+                key
+                for key in (
+                    "endpoint",
+                    "bucket",
+                    "access_key",
+                    "secret_key",
+                    "public_base_url",
+                    "region",
                 )
-            ):
-                raise PiggyError("请先配置 S3/R2 上传接口、桶名、凭据和图片公网域名。")
+                if not getattr(self, key)
+            ]
+            if missing:
+                raise PiggyError(f"S3/R2 配置缺少：{', '.join(missing)}。请在插件配置中填写。")
             https_url(self.endpoint)
             https_url(self.public_base_url)
+            if urlsplit(self.endpoint).query:
+                raise PiggyError("endpoint 必须是 S3 API 地址，不能包含查询参数或签名链接。")
+            if any(c.isspace() or c in "/\\" for c in self.bucket):
+                raise PiggyError("bucket 只能填写桶名，不能填写 URL、路径或带空格的名称。")
             if urlsplit(self.public_base_url).query:
                 raise PiggyError("图片公网根地址不能带查询参数。")
         else:

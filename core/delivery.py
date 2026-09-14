@@ -118,7 +118,15 @@ class Sender:
             transport,
         )
 
-    async def send(self, event, app_id: str, message: Message, deadline: float | None = None):
+    async def send(
+        self,
+        event,
+        app_id: str,
+        message: Message,
+        deadline: float | None = None,
+        *,
+        force_upload: bool = False,
+    ):
         key = message_key(event, app_id)
         receipt = await self.db.delivery(key)
         if receipt["done"]:
@@ -127,7 +135,7 @@ class Sender:
         deadline = deadline or (time.monotonic() + 240)
         urls = []
         for path in message.images:
-            urls.append(await self.publisher.publish(path, deadline=deadline))
+            urls.append(await self.publisher.publish(path, force=force_upload, deadline=deadline))
         refreshed = False
         for attempt in range(self.settings.image_retry_count + 1):
             if time.monotonic() >= deadline:

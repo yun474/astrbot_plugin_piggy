@@ -15,8 +15,9 @@ from .core.catalog import initialize_catalog, read_catalog
 from .core.config import PiggyError, Settings
 from .core.database import Database
 from .core.delivery import Message, QQError, QQTransport, Sender, message_key
+from .core.diagnostics import exception_detail
 from .core.rendering import clean_cards
-from .core.storage import ImagePublisher
+from .core.storage import ImagePublisher, UploadError
 from .core.views import collection_message, keyboard, ranking_message, today_message
 
 
@@ -173,20 +174,35 @@ class PiggyPlugin(Star):
                         "# 图片链路检查\n\n![诊断小猪 #192px #192px]({{image:0}})\n\nQQ 图片转存检查已通过。",
                         (self.root / "assets" / pig["asset"],),
                     )
-                await self.sender.send(event, app_id, message, deadline)
+                await self.sender.send(
+                    event, app_id, message, deadline, force_upload=command == "diagnose"
+                )
             except PiggyError as exc:
-                logger.warning("[piggy] Request failed: %s", exc)
+                if isinstance(exc, UploadError):
+                    logger.warning(
+                        "[piggy] Upload failed command=%s attempt=%s/%s retryable=%s: %s | %s",
+                        command,
+                        exc.attempt,
+                        self.settings.upload_retry_count + 1,
+                        exc.retryable,
+                        exc,
+                        exc.diagnostic or exception_detail(exc, self.settings),
+                    )
+                else:
+                    logger.warning("[piggy] Request failed command=%s: %s", command, exc)
                 if isinstance(exc, QQError) and exc.uncertain:
                     return
                 await self._failure(event, str(exc))
             except (sqlite3.Error, OSError) as exc:
-                logger.error("[piggy] Storage failure (%s).", type(exc).__name__)
+                logger.error("[piggy] Storage failure: %s", exception_detail(exc, self.settings))
                 await self._failure(
                     event,
                     "数据或素材暂时无法读写，请联系管理员检查。已有抽取记录不会被清空。",
                 )
             except Exception as exc:
-                logger.error("[piggy] Unexpected request failure (%s).", type(exc).__name__)
+                logger.error(
+                    "[piggy] Unexpected request failure: %s", exception_detail(exc, self.settings)
+                )
                 await self._failure(event, "处理暂时失败，请联系管理员查看插件日志。")
 
     async def _failure(self, event, text: str):

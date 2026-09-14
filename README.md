@@ -72,7 +72,7 @@
 | 小猪称呼 名字 | 设置自己的展示称呼，1–24 字，不影响账号身份 |
 | 小猪重载 | AstrBot 管理员：校验并应用猪库变化 |
 | 小猪备份 | AstrBot 管理员：创建完整本地备份 |
-| 小猪诊断 | AstrBot 管理员：上传一张小猪图，发送并检查 QQ 图片转存 |
+| 小猪诊断 | AstrBot 管理员：强制上传一张小猪图（绕过 URL 缓存），发送并检查 QQ 图片转存 |
 
 四个主入口附带真实 QQ keyboard 指令按钮；分页和排行榜切换同样使用按钮。根据 QQ 官方字段说明，群聊指令按钮会把指令填入输入框，用户发送后执行。此包不接入点击即执行的回调按钮，不修改 AstrBot 全局事件订阅。
 
@@ -212,6 +212,28 @@ HTTP JSON 模式把 `file_field` 指定的字段设置为原始图片的 Base64 
 - 图片本地内容与抽取账本保留，之后重新发指令可以继续展示，不增加收藏次数。
 
 发送模块复用 AstrBot 的 QQ 客户端令牌生命周期，以独立 HTTP 请求保留结构化错误码，避免 `qq-botpy 1.2.1` 仅抛出错误文案造成误判。不会记录 Authorization、图床请求头或签名 URL。
+
+## 🩺 Docker 上传故障排查
+
+更新插件后重新加载插件，再以管理员身份执行“小猪诊断”。诊断会强制上传图片，不会因旧 URL 缓存而跳过对象存储检查，也不消耗每日抽取。
+
+此前“对象存储请求配置无效”的提示无法区分 SDK、TLS 与代理故障，不能据此认定凭据有误。新版后台日志包含 `command`、实际尝试次数/最大次数、是否可重试、`stage`（`create_client` 或 `put_object`）、异常类型、boto3/botocore 版本及脱敏原因。S3 服务返回错误时另记 HTTP 状态、服务错误码和 Request ID；群内只发送简短原因及检查方向。
+
+| 日志中的类型或错误码 | 含义与检查方向 |
+| --- | --- |
+| `SSLError` + `CERTIFICATE_VERIFY_FAILED` | 容器 TLS 证书校验失败；检查容器 CA 证书、系统时间、`AWS_CA_BUNDLE` 与 HTTPS 代理证书链，不要关闭 TLS 校验 |
+| `SSLError` + `EOF` / 握手中断 | TLS 连接被中断；按配置重试，检查容器网络与代理 |
+| `ProxyConnectionError` | 连接进程环境指定的代理失败；检查容器内 `HTTP_PROXY` / `HTTPS_PROXY`，容器中的 `127.0.0.1` 指向容器本身 |
+| `EndpointConnectionError` / 超时 | 检查容器 DNS、S3 API 地址可达性和网络超时；日志保留底层原因 |
+| `ParamValidationError` | SDK 参数校验未通过，按日志指出的具体字段修正 |
+| `TypeError` + `create_client` | 常见于 SDK 参数或依赖不兼容，先核对日志中的 SDK 版本和 `requirements.txt`，不能直接判断为凭据错误 |
+| `AccessDenied` / `InvalidAccessKeyId` | 对象写入权限不足，或 S3 凭据与账户接口不匹配 |
+| `SignatureDoesNotMatch` | 核对 Secret Access Key、区域、接口与系统时间 |
+| `NoSuchBucket` | 桶名或账户接口不匹配 |
+
+日志不输出完整配置、凭据、代理密码或签名 URL 的查询参数；请提供新版 `[piggy] Upload failed` 行进行定位，不要发送密钥。配置里的 S3 地址、桶名、凭据和区域会自动去除首尾空白；桶名不能填 URL，API 地址不能填临时签名链接。
+
+本地回归覆盖异常分类、日志脱敏和 S3 的真实 HTTP 请求/错误响应解析；这不替代部署容器到 R2 的 TLS、DNS 与权限联调。异常分类依据 [Boto3 错误处理文档](https://docs.aws.amazon.com/boto3/latest/guide/error-handling.html)，R2 配置可参照 [Cloudflare 官方 boto3 示例](https://developers.cloudflare.com/r2/examples/aws/boto3/)。
 
 <a id="catalog"></a>
 

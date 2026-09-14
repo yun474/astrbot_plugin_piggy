@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from core.catalog import initialize_catalog, read_catalog
 from core.config import PiggyError, Settings
 from core.database import Database
+from core.diagnostics import safe_detail
 from core.views import collection_message, keyboard, md, ranking_message, today_message
 
 
@@ -238,6 +239,47 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigAndButtonsTests(unittest.TestCase):
+    def test_s3_config_trims_pasted_whitespace_and_names_invalid_fields(self):
+        config = {
+            "endpoint": " https://s3.example.com \n",
+            "bucket": " pigs ",
+            "access_key": " key ",
+            "secret_key": " secret ",
+            "public_base_url": " https://images.example.com ",
+            "region": " auto ",
+        }
+        settings = Settings.from_dict(config)
+        settings.check_host()
+        self.assertEqual(settings.access_key, "key")
+        self.assertEqual(settings.region, "auto")
+        for field, value in (
+            ("bucket", "https://example.com/pigs"),
+            ("endpoint", "https://s3.example.com?token=x"),
+            ("region", " "),
+        ):
+            with self.assertRaisesRegex(PiggyError, field):
+                Settings.from_dict({**config, field: value}).check_host()
+
+    def test_diagnostics_hide_secrets_proxy_passwords_and_signed_queries(self):
+        settings = Settings(access_key="ACCESS_PRIVATE", secret_key="SECRET_PRIVATE")
+        detail = safe_detail(
+            "ACCESS_PRIVATE SECRET_PRIVATE https://user:password@proxy.local:8080/path "
+            "https://s3.example.com/a?X-Amz-Signature=hidden-signature&token=hidden-token "
+            "\nAuthorization: Bearer hidden-bearer\nSSL CERTIFICATE_VERIFY_FAILED",
+            settings,
+        )
+        for secret in (
+            "ACCESS_PRIVATE",
+            "SECRET_PRIVATE",
+            "user:password",
+            "hidden-signature",
+            "hidden-token",
+            "hidden-bearer",
+        ):
+            self.assertNotIn(secret, detail)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", detail)
+        self.assertNotIn("\n", detail)
+
     def test_today_mentions_requester_and_quotes_all_description_lines(self):
         result = {
             "pig": {

@@ -13,12 +13,15 @@ import aiohttp
 
 from .config import PiggyError, Settings, https_url
 from .database import Database
+from .diagnostics import safe_detail
 
 
 class UploadError(PiggyError):
-    def __init__(self, message: str, retryable: bool = False):
+    def __init__(self, message: str, retryable: bool = False, *, diagnostic: str = ""):
         super().__init__(message)
         self.retryable = retryable
+        self.diagnostic = diagnostic
+        self.attempt = 1
 
 
 class ImageHost(Protocol):
@@ -33,6 +36,7 @@ class S3Host:
 
     async def upload(self, data: bytes, key: str, content_type: str) -> str:
         import boto3
+        import botocore
         from botocore.config import Config
         from botocore.exceptions import (
             BotoCoreError,
@@ -40,10 +44,29 @@ class S3Host:
             ConnectionClosedError,
             ConnectTimeoutError,
             EndpointConnectionError,
+            HTTPClientError,
+            NoCredentialsError,
+            ParamValidationError,
+            PartialCredentialsError,
+            ProxyConnectionError,
             ReadTimeoutError,
+            SSLError,
         )
 
+        stage = "create_client"
+
+        def failure(exc, message, retryable=False, extra=""):
+            detail = safe_detail(
+                f"provider=s3 stage={stage} exception={type(exc).__name__} "
+                f"boto3={boto3.__version__} botocore={botocore.__version__} "
+                f"region={self.settings.region} addressing_style={self.settings.addressing_style} "
+                f"{extra} reason={exc} cause={getattr(exc, 'kwargs', {}).get('error', '')}",
+                self.settings,
+            )
+            return UploadError(message, retryable, diagnostic=detail)
+
         def put():
+            nonlocal stage
             if self.client is None:
                 self.client = boto3.client(
                     "s3",
@@ -62,6 +85,7 @@ class S3Host:
                     ),
                 )
             # No ACL: R2 does not implement x-amz-acl. Public access is bucket/domain configuration.
+            stage = "put_object"
             self.client.put_object(
                 Bucket=self.settings.bucket,
                 Key=key,
@@ -80,19 +104,70 @@ class S3Host:
                 or status >= 500
                 or code in {"SlowDown", "RequestTimeout", "InternalError"}
             )
-            raise UploadError(
-                f"对象存储上传失败（HTTP {status}）；请检查桶、凭据或服务状态。",
+            hints = {
+                "AccessDenied": "服务拒绝写入，请检查此凭据是否有目标桶的对象写入权限。",
+                "InvalidAccessKeyId": "服务不认可 Access Key ID，请核对 R2 的 S3 凭据与账户接口是否匹配。",
+                "SignatureDoesNotMatch": "请求签名不匹配，请核对 Secret Access Key、区域和服务器时间。",
+                "NoSuchBucket": "服务找不到该桶，请检查桶名和账户接口是否匹配。",
+                "RequestTimeTooSkewed": "服务器时间偏差过大，请同步系统时间。",
+                "ExpiredToken": "临时凭据已过期，请更新凭据。",
+                "InvalidToken": "服务拒绝凭据令牌，请检查凭据类型。",
+                "AuthorizationHeaderMalformed": "签名区域或认证格式不符，请核对区域与接口地址。",
+                "NotImplemented": "服务不支持本次上传参数，请查看日志中的 SDK 原因。",
+            }
+            hint = hints.get(
+                code, "服务暂时不可用，将按配置重试。" if retryable else "请查看后台详细原因。"
+            )
+            request_id = exc.response.get("ResponseMetadata", {}).get("RequestId", "")
+            raise failure(
+                exc,
+                f"对象存储上传失败（HTTP {status}，{safe_detail(code, self.settings)}）。{hint}",
                 retryable,
+                f"http_status={status} code={code} request_id={request_id}",
+            ) from None
+        except SSLError as exc:
+            certificate_error = (
+                "CERTIFICATE_VERIFY_FAILED" in str(exc)
+                or "certificate verify failed" in str(exc).lower()
+            )
+            raise failure(
+                exc,
+                "对象存储 TLS/SSL 握手或证书校验失败，请检查容器 CA 证书、系统时间和 HTTPS 代理；详细原因见日志。",
+                not certificate_error,
+            ) from None
+        except ProxyConnectionError as exc:
+            raise failure(
+                exc,
+                "对象存储代理连接失败，请检查 AstrBot 进程的 HTTP_PROXY/HTTPS_PROXY 和代理可达性。",
+                True,
+            ) from None
+        except ParamValidationError as exc:
+            raise failure(
+                exc, "对象存储 SDK 参数校验失败，请查看日志中的具体字段；尚未完成上传。"
+            ) from None
+        except (NoCredentialsError, PartialCredentialsError) as exc:
+            raise failure(
+                exc, "对象存储 SDK 未取得完整凭据，请填写 Access Key ID 和 Secret Access Key。"
             ) from None
         except (
             EndpointConnectionError,
             ConnectTimeoutError,
             ReadTimeoutError,
             ConnectionClosedError,
-        ):
-            raise UploadError("对象存储连接失败，请检查接口地址及网络。", True) from None
-        except BotoCoreError:
-            raise UploadError("对象存储请求配置无效，请检查接口、区域、凭据和桶名。") from None
+        ) as exc:
+            raise failure(
+                exc,
+                f"对象存储网络请求失败（{type(exc).__name__}），请检查 DNS、接口可达性及超时设置。",
+                True,
+            ) from None
+        except HTTPClientError as exc:
+            raise failure(
+                exc, "对象存储 HTTP 客户端异常，请查看日志中的底层网络或 SDK 原因。", True
+            ) from None
+        except (BotoCoreError, ValueError, TypeError) as exc:
+            raise failure(
+                exc, f"对象存储 SDK 请求失败（{type(exc).__name__}），具体参数或依赖原因见日志。"
+            ) from None
         return https_url(f"{self.settings.public_base_url.rstrip('/')}/{quote(key, safe='/')}")
 
     async def close(self):
@@ -216,6 +291,7 @@ class ImagePublisher:
                     await self.db.cache_put(self.namespace, digest, key, url)
                     return url
                 except UploadError as exc:
+                    exc.attempt = attempt + 1
                     if not exc.retryable or attempt == self.settings.upload_retry_count:
                         raise
                     delay = self.settings.delay(attempt)

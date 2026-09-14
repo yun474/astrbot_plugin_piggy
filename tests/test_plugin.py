@@ -152,6 +152,24 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         user = await self.plugin.db.identify("app", "member", "a", "")
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 0)
 
+    async def test_diagnose_bypasses_url_cache_and_logs_upload_details(self):
+        from astrbot_plugin_piggy.core.storage import UploadError
+
+        await self.plugin.diagnose(OfficialEvent("diagnose-1"))
+        self.assertEqual(self.plugin.publisher.host.upload.await_count, 1)
+        self.plugin.publisher.host.upload.side_effect = UploadError(
+            "TLS/SSL 证书校验失败",
+            diagnostic="provider=s3 stage=put_object exception=SSLError reason=CERTIFICATE_VERIFY_FAILED",
+        )
+        with self.assertLogs("piggy-tests", level="WARNING") as logs:
+            await self.plugin.diagnose(OfficialEvent("diagnose-2"))
+        self.assertEqual(self.plugin.publisher.host.upload.await_count, 2)
+        self.assertIn("command=diagnose attempt=1/3", logs.output[0])
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", logs.output[0])
+        payload = self.plugin.transport.request.await_args.args[1]
+        self.assertEqual(payload["msg_type"], 0)
+        self.assertEqual(payload["content"], "TLS/SSL 证书校验失败")
+
     async def test_reload_backup_admin_declarations_and_missing_manifest_preserves_catalog(self):
         await self.plugin.initialize()
         self.assertTrue(self.plugin.reload.admin_only)
