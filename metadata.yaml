@@ -1,0 +1,7 @@
+name: astrbot_plugin_piggy
+display_name: 小猪收集册
+desc: QQ 官方机器人每日抽猪、跨群收藏、图鉴和排行，支持 R2/S3 与 HTTP 图床。
+version: "0.0.0"
+author: yun474
+repo: "https://github.com/yun474/astrbot_plugin_piggy"
+astrbot_version: ">=3.5.3"

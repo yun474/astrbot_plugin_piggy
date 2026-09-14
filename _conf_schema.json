@@ -1,0 +1,159 @@
+{
+  "provider": {
+    "description": "图床类型",
+    "type": "string",
+    "default": "s3",
+    "hint": "s3 适配 R2/其他 S3 兼容存储；http 适配自定义上传 API。",
+    "options": [
+      "s3",
+      "http"
+    ]
+  },
+  "endpoint": {
+    "description": "S3 上传接口",
+    "type": "string",
+    "default": "",
+    "hint": "R2：https://<ACCOUNT_ID>.r2.cloudflarestorage.com；不是图片公网域名。"
+  },
+  "bucket": {
+    "description": "S3 桶名",
+    "type": "string",
+    "default": "",
+    "hint": "只填桶名称，不填 URL。"
+  },
+  "access_key": {
+    "description": "S3 Access Key ID",
+    "type": "string",
+    "default": "",
+    "hint": "使用只允许目标桶读写的 API 凭据；不要填写 Cloudflare 全局 API Key。"
+  },
+  "secret_key": {
+    "description": "S3 Secret Access Key",
+    "type": "string",
+    "default": "",
+    "hint": "密钥仅用于上传，不会放进 Markdown 或日志。"
+  },
+  "region": {
+    "description": "S3 区域",
+    "type": "string",
+    "default": "auto",
+    "hint": "R2 填 auto，其他存储按供应商要求填写。"
+  },
+  "public_base_url": {
+    "description": "图片公网根地址",
+    "type": "string",
+    "default": "",
+    "hint": "例如 https://img.example.com；需已绑定 R2 桶且无需登录即可下载。"
+  },
+  "key_prefix": {
+    "description": "图片对象目录",
+    "type": "string",
+    "default": "piggy",
+    "hint": "默认 piggy。只上传图片，不上传数据库或备份。"
+  },
+  "addressing_style": {
+    "description": "S3 地址模式",
+    "type": "string",
+    "default": "path",
+    "hint": "R2 推荐 path；其他 S3 服务按要求选择。",
+    "options": [
+      "path",
+      "virtual",
+      "auto"
+    ]
+  },
+  "upload_url": {
+    "description": "HTTP 图床上传 API",
+    "type": "string",
+    "default": "",
+    "hint": "provider=http 时使用。填写完整 HTTPS 上传地址。"
+  },
+  "upload_mode": {
+    "description": "HTTP 上传编码",
+    "type": "string",
+    "default": "multipart",
+    "hint": "multipart 上传文件；json_base64 将图片编码后放进 JSON 字段。",
+    "options": [
+      "multipart",
+      "json_base64"
+    ]
+  },
+  "upload_headers": {
+    "description": "HTTP 请求头 JSON",
+    "type": "text",
+    "default": "{}",
+    "hint": "例如 {\"Authorization\":\"Bearer token\"}。不要手填 multipart 的 Content-Type。"
+  },
+  "upload_fields": {
+    "description": "HTTP 附加字段 JSON",
+    "type": "text",
+    "default": "{}",
+    "hint": "例如 {\"strategy_id\":1} 或 {\"key\":\"API_KEY\",\"format\":\"json\"}。"
+  },
+  "file_field": {
+    "description": "HTTP 图片字段名",
+    "type": "string",
+    "default": "file",
+    "hint": "Lsky 通常为 file，Chevereto 通常为 source。"
+  },
+  "response_url_path": {
+    "description": "HTTP 响应直链路径",
+    "type": "string",
+    "default": "data.links.url",
+    "hint": "以点分隔对象字段/数组索引；例如 data.links.url、image.url、data.0.url。"
+  },
+  "success_path": {
+    "description": "HTTP 成功状态路径",
+    "type": "string",
+    "default": "",
+    "hint": "可选；例如 status 或 status_code。空值表示只验证 HTTP 状态和图片直链。"
+  },
+  "success_value": {
+    "description": "HTTP 成功值 JSON",
+    "type": "text",
+    "default": "true",
+    "hint": "填 true、200 或 \"success\"，必须与返回字段类型一致。"
+  },
+  "upload_retry_count": {
+    "description": "图床上传失败重试次数",
+    "type": "int",
+    "default": 2,
+    "hint": "不含首次请求；0=只尝试一次。仅重试网络异常、429 和服务端临时失败。"
+  },
+  "image_retry_count": {
+    "description": "QQ 图片转存/临时发送失败重试次数",
+    "type": "int",
+    "default": 3,
+    "hint": "不含首次请求；0=只尝试一次。强制校验 QQ 图片转存，超时保留消息序号，明确拒绝后才更换序号。"
+  },
+  "retry_base_delay": {
+    "description": "重试基础间隔（秒）",
+    "type": "float",
+    "default": 1.0,
+    "hint": "指数退避，单次等待上限 15 秒；本次处理最多等待约 240 秒。"
+  },
+  "request_timeout": {
+    "description": "单次网络请求超时（秒）",
+    "type": "float",
+    "default": 20.0,
+    "hint": "图床上传及 QQ 请求的网络超时。"
+  },
+  "backup_keep": {
+    "description": "本地备份保留份数",
+    "type": "int",
+    "default": 7,
+    "hint": "启动及每 24 小时备份一次；管理员也可执行小猪备份。备份不上传图床。"
+  },
+  "cache_ttl_hours": {
+    "description": "图床直链缓存时间（小时）",
+    "type": "int",
+    "default": 168,
+    "hint": "超过时间重新上传；QQ 明确报告图片转存失败时也会重新上传一次。应小于图床链接有效期。"
+  },
+  "command_prefix": {
+    "description": "快捷按钮指令前缀",
+    "type": "string",
+    "default": "/",
+    "hint": "应与 AstrBot 唤醒前缀一致，默认 /。群聊按官方规则填入输入框后由用户发送。"
+  }
+}
