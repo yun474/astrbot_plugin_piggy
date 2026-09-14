@@ -10,14 +10,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from botpy.message import C2CMessage, GroupMessage
+from botpy.message import Message as ChannelMessage
+
 
 class OfficialEvent:
     def __init__(self, message_id="event", user="member", group="group-a"):
         self.group, self.user = group, user
         self.message_obj = SimpleNamespace(
             message_id=message_id,
-            raw_message=SimpleNamespace(author=SimpleNamespace(username="玩家名字")),
+            raw_message=GroupMessage(
+                None,
+                message_id,
+                {"id": message_id, "group_openid": group, "author": {"member_openid": user}},
+            ),
         )
+        self.message_obj.raw_message.author.username = "玩家名字"
         self.bot = SimpleNamespace(
             api=SimpleNamespace(_http=SimpleNamespace(_token=SimpleNamespace(app_id="app")))
         )
@@ -38,6 +46,102 @@ class OfficialEvent:
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_channel_and_private_scenes_do_not_write_or_upload(self):
+        self.plugin.db.identify = AsyncMock()
+        for raw_type in (ChannelMessage, C2CMessage):
+            event = OfficialEvent("unsupported", group="channel-id")
+            event.message_obj.raw_message = raw_type(None, "event", {})
+            await self.plugin.draw(event)
+            event.send.assert_awaited_once()
+        self.plugin.db.identify.assert_not_awaited()
+        self.plugin.publisher.host.upload.assert_not_awaited()
+        self.plugin.transport.request.assert_not_awaited()
+        self.assertFalse(self.plugin.db.path.exists())
+
+    async def test_queue_is_bounded_and_one_user_cannot_fill_it(self):
+        release = asyncio.Event()
+        self.plugin._execute = AsyncMock()
+        for _ in range(3):
+            await self.plugin.limit.acquire()
+
+        # Use an async side effect so the sole overload notice stays in flight.
+        async def busy(*args):
+            await release.wait()
+
+        self.plugin._failure = AsyncMock(side_effect=busy)
+        events = [OfficialEvent(f"event-{i}", user=f"user-{i}") for i in range(100)]
+        calls = [asyncio.create_task(self.plugin.draw(event)) for event in events]
+        for _ in range(5):
+            await asyncio.sleep(0)
+        self.assertEqual(len(self.plugin.inflight), self.module.MAX_INFLIGHT)
+        self.assertEqual(self.plugin._failure.await_count, 1)
+        await self.plugin.draw(OfficialEvent("same-user-again", user="user-0"))
+        self.assertEqual(len(self.plugin.inflight), self.module.MAX_INFLIGHT)
+        release.set()
+        for _ in range(3):
+            self.plugin.limit.release()
+        await asyncio.gather(*calls)
+        self.assertEqual(self.plugin._execute.await_count, self.module.MAX_INFLIGHT)
+        self.assertFalse(self.plugin.inflight)
+        self.assertFalse(self.plugin.active_users)
+
+    async def test_queued_request_expires_without_waiting_for_a_worker(self):
+        self.plugin._execute = AsyncMock()
+        self.plugin._failure = AsyncMock()
+        for _ in range(3):
+            await self.plugin.limit.acquire()
+        with patch.object(self.module, "REQUEST_TIMEOUT", 0.02):
+            await asyncio.wait_for(self.plugin.draw(OfficialEvent()), 1)
+        self.plugin._execute.assert_not_awaited()
+        self.plugin._failure.assert_awaited_once()
+        self.assertFalse(self.plugin.inflight)
+        for _ in range(3):
+            self.plugin.limit.release()
+
+    async def test_shutdown_drains_running_work_and_skips_queued_work(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def execute(*args):
+            if self.plugin._execute.await_count == 3:
+                entered.set()
+            await release.wait()
+
+        self.plugin._execute = AsyncMock(side_effect=execute)
+        self.plugin.transport.close = AsyncMock()
+        calls = [
+            asyncio.create_task(self.plugin.draw(OfficialEvent(str(i), user=str(i))))
+            for i in range(6)
+        ]
+        await asyncio.wait_for(entered.wait(), 1)
+        shutdown = asyncio.create_task(self.plugin.terminate())
+        await asyncio.sleep(0)
+        await self.plugin.draw(OfficialEvent("after-stop", user="new-user"))
+        self.plugin.transport.close.assert_not_awaited()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*calls, shutdown), 1)
+        self.assertEqual(self.plugin._execute.await_count, 3)
+        self.plugin.transport.close.assert_awaited_once()
+        self.assertFalse(self.plugin.inflight)
+
+    async def test_cancelled_handler_keeps_work_registered_until_completion(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def execute(*args):
+            entered.set()
+            await release.wait()
+
+        self.plugin._execute = AsyncMock(side_effect=execute)
+        call = asyncio.create_task(self.plugin.draw(OfficialEvent()))
+        await asyncio.wait_for(entered.wait(), 1)
+        call.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await call
+        self.assertEqual(len(self.plugin.inflight), 1)
+        release.set()
+        await self.plugin.terminate()
+        self.assertFalse(self.plugin.inflight)
+        self.assertFalse(self.plugin.active_users)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

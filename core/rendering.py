@@ -1,7 +1,12 @@
+import hashlib
 import io
+import lzma
 import math
+import shutil
+import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -18,7 +23,29 @@ ACCENT = "#b85969"
 PANEL = "#f5e8da"
 BORDER = "#ebdfd1"
 TRACK = "#e8d6c6"
-FONT = Path(__file__).resolve().parents[1] / "resources" / "fonts" / "NotoSansSC.ttf"
+FONT = Path(__file__).resolve().parents[1] / "resources" / "fonts" / "NotoSansSC.ttf.xz"
+_FONT_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def _font_digest() -> str:
+    return hashlib.sha256(FONT.read_bytes()).hexdigest()[:16]
+
+
+def font_path(root: Path) -> Path:
+    """Expand the bundled font once into plugin data, preserving all glyphs and weights."""
+    path = root / "fonts" / f"NotoSansSC-{_font_digest()}.ttf"
+    with _FONT_LOCK:
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".tmp")
+            try:
+                with lzma.open(FONT, "rb") as source, temp.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                temp.replace(path)
+            finally:
+                temp.unlink(missing_ok=True)
+    return path
 
 
 @dataclass(frozen=True)
@@ -41,11 +68,12 @@ def render_collection(
     image = Image.new("RGB", (WIDTH, height), BG)
     draw = ImageDraw.Draw(image)
     fonts = {}
+    font_file = font_path(root)
 
     def font(size, bold=False):
         key = size, bold
         if key not in fonts:
-            face = ImageFont.truetype(str(FONT), size)
+            face = ImageFont.truetype(str(font_file), size)
             face.set_variation_by_axes([700 if bold else 400])
             fonts[key] = face
         return fonts[key]
@@ -153,14 +181,15 @@ def finish(image: Image.Image) -> Card:
 class Canvas:
     """Small shared drawing helpers for the two new cream cards."""
 
-    def __init__(self, width: int, height: int):
+    def __init__(self, root: Path, width: int, height: int):
         self.image = Image.new("RGB", (width, height), BG)
         self.draw = ImageDraw.Draw(self.image)
         self.fonts = {}
+        self.font_file = font_path(root)
 
     def font(self, size, bold=False):
         if (size, bold) not in self.fonts:
-            face = ImageFont.truetype(str(FONT), size)
+            face = ImageFont.truetype(str(self.font_file), size)
             face.set_variation_by_axes([700 if bold else 400])
             self.fonts[size, bold] = face
         return self.fonts[size, bold]
@@ -189,14 +218,14 @@ class Canvas:
 
 def render_today(root: Path, name: str, result: dict, progress: dict, state: str) -> Card:
     pig = result["pig"]
-    canvas = Canvas(WIDTH, 1)
+    canvas = Canvas(root, WIDTH, 1)
     description = " ".join(pig["description"].split())
     analysis = " ".join(pig["analysis"].split())
     lines = canvas.wrap(f"{description}\n\n{analysis}", 28, 880)
     canvas.image.close()
     description_y = 870
     panel_bottom = description_y + 58 + 43 * len(lines)
-    canvas = Canvas(WIDTH, panel_bottom + 262)
+    canvas = Canvas(root, WIDTH, panel_bottom + 262)
     canvas.text("PIGGY  /  DAILY", 58, 34, 18, ACCENT, True)
     canvas.text("今日小猪", 54, 76, 56, bold=True)
     canvas.text(name, 58, 158, 25, SUB, width=700)
@@ -232,10 +261,10 @@ def render_today(root: Path, name: str, result: dict, progress: dict, state: str
     return finish(canvas.image)
 
 
-def render_ranking(boards: dict, avatars: dict[str, bytes]) -> Card:
+def render_ranking(root: Path, boards: dict, avatars: dict[str, bytes]) -> Card:
     """Both top tens in one sheet; nickname and avatar share a pill."""
     rows = max(1, *(len(boards[k][:10]) for k in ("species", "total")))
-    canvas = Canvas(1488, 312 + rows * 105 + 92)
+    canvas = Canvas(root, 1488, 312 + rows * 105 + 92)
     canvas.text("PIGGY  /  LEADERBOARD", 56, 34, 18, ACCENT, True)
     canvas.text("小猪排行榜", 52, 79, 56, bold=True)
     canvas.text("本群玩家 · 跨群累计收藏（含下架收藏）", 58, 166, 24, SUB)

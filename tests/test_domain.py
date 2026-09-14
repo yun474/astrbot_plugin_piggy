@@ -124,6 +124,34 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PiggyError):
             read_catalog(self.root)
 
+    async def test_corrupt_or_disguised_image_preserves_accepted_catalog(self):
+        definitions = json.loads(self.manifest.read_text("utf-8"))
+        asset_count = len(list((self.root / "assets").iterdir()))
+        with io.BytesIO() as output:
+            Image.new("RGB", (128, 128), "red").save(output, "JPEG")
+            jpeg = output.getvalue()
+        with io.BytesIO() as output:
+            Image.new("RGB", (16, 16), "blue").save(output, "BMP")
+            bmp = output.getvalue()
+        for name, data in (("bad.jpg", jpeg[:-20]), ("disguised.png", bmp)):
+            with self.subTest(name=name):
+                (self.root / "catalog" / name).write_bytes(data)
+                definitions[0]["image"] = name
+                self.manifest.write_text(json.dumps(definitions), "utf-8")
+                with self.assertRaises(PiggyError):
+                    await self.db.catalog(read_catalog(self.root))
+                self.assertEqual((await self.db.collection(self.user["id"]))["active_total"], 2)
+                self.assertEqual(len(list((self.root / "assets").iterdir())), asset_count)
+
+    async def test_legacy_wrong_suffix_uses_detected_format(self):
+        definitions = json.loads(self.manifest.read_text("utf-8"))
+        Image.new("RGB", (16, 16), "blue").save(self.root / "catalog" / "legacy.png", "WEBP")
+        definitions[0]["image"] = "legacy.png"
+        self.manifest.write_text(json.dumps(definitions), "utf-8")
+        pigs = read_catalog(self.root)
+        self.assertTrue(pigs[0]["asset"].endswith(".webp"))
+        await self.db.catalog(pigs)
+
     async def test_restore_backup_and_rotation(self):
         await self.db.draw(self.user["id"], "a", "event")
         for _ in range(3):
@@ -339,9 +367,13 @@ class ConfigAndButtonsTests(unittest.TestCase):
             labels.append(str(text))
             return original(canvas, xy, text, *args, **kwargs)
 
-        with patch.object(ImageDraw.ImageDraw, "text", record):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(ImageDraw.ImageDraw, "text", record),
+        ):
             message = ranking_message(
                 Settings(display={"ranking": True}),
+                Path(tmp),
                 user,
                 {"species": players, "total": players},
                 {},

@@ -111,8 +111,12 @@ async def collection_message(
     return card_message(settings, user, card, title, "atlas" if atlas else "pen", page, pages)
 
 
-def ranking_message(settings: Settings, user: dict, boards: dict, avatars: dict) -> Message:
-    return card_message(settings, user, render_ranking(boards, avatars), "小猪排行榜", "ranking")
+def ranking_message(
+    settings: Settings, root: Path, user: dict, boards: dict, avatars: dict
+) -> Message:
+    return card_message(
+        settings, user, render_ranking(root, boards, avatars), "小猪排行榜", "ranking"
+    )
 
 
 def card_message(settings, user, card, title, command, page=1, pages=1):

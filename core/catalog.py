@@ -1,7 +1,7 @@
 import hashlib
+import io
 import json
 import re
-import shutil
 from pathlib import Path
 
 from PIL import Image
@@ -14,9 +14,17 @@ def initialize_catalog(data_dir: Path, resources: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     if not (target / "pigs.json").exists():
         # The manifest is the completion marker, copied only after the images.
-        shutil.copytree(resources / "images", target / "images", dirs_exist_ok=True)
+        images = target / "images"
+        images.mkdir(exist_ok=True)
+        definitions = json.loads((resources / "pigs.json").read_text("utf-8"))
+        for pig in definitions:
+            source = resources / pig["image"]
+            name = source.stem + ".png"
+            with Image.open(source) as image:
+                image.save(images / name, "PNG")
+            pig["image"] = f"images/{name}"
         temp = target / "pigs.json.tmp"
-        shutil.copyfile(resources / "pigs.json", temp)
+        temp.write_text(json.dumps(definitions, ensure_ascii=False, indent=2), "utf-8")
         temp.replace(target / "pigs.json")
 
 
@@ -57,15 +65,25 @@ def read_catalog(data_dir: Path) -> list[dict]:
         try:
             if path.stat().st_size > 10 * 1024 * 1024:
                 raise ValueError("Image too large")
-            with Image.open(path) as img:
+            with path.open("rb") as source:
+                raw = source.read(10 * 1024 * 1024 + 1)
+            if len(raw) > 10 * 1024 * 1024:
+                raise ValueError("Image too large")
+            suffix = path.suffix.lower()
+            formats = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
+            with Image.open(io.BytesIO(raw)) as img:
+                if suffix not in {".png", ".jpg", ".jpeg", ".webp"} or img.format not in formats:
+                    raise ValueError("Unsupported image format")
+                # Some older bundled .png files actually contain WebP. Preserve them
+                # while giving archived assets the correct suffix and upload MIME type.
+                suffix = formats[img.format]
                 if img.width * img.height > 16_000_000:
                     raise ValueError("Image dimensions too large")
                 img.verify()
-            raw = path.read_bytes()
+            # verify() does not decode JPEG pixels. Validate the exact bytes we archive.
+            with Image.open(io.BytesIO(raw)) as img:
+                img.load()
             digest = hashlib.sha256(raw).hexdigest()
-            suffix = path.suffix.lower()
-            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-                raise ValueError("Unsupported image format")
             asset_name = f"{digest}{suffix}"
             dest = archive / asset_name
             if not dest.exists():
