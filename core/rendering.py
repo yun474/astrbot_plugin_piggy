@@ -1,14 +1,10 @@
-import hashlib
-import json
+import io
 import math
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-
-from .catalog import thumbnail
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # One sheet contains the entire initial catalog. Limits keep future expansions
 # below QQ's practical image size and the renderer's memory budget.
@@ -27,7 +23,7 @@ FONT = Path(__file__).resolve().parents[1] / "resources" / "fonts" / "NotoSansSC
 
 @dataclass(frozen=True)
 class Card:
-    path: Path
+    data: bytes
     width: int
     height: int
 
@@ -42,24 +38,6 @@ def render_collection(
     row_step = 122 if atlas else 246
     rows = max(1, math.ceil(len(entries) / columns))
     height = top + rows * row_step + 78
-    signature = {
-        "revision": "cream-v2",
-        "name": name,
-        "atlas": atlas,
-        "page": page,
-        "pages": pages,
-        "progress": {k: v for k, v in progress.items() if k != "entries"},
-        "entries": entries,
-    }
-    digest = hashlib.sha256(
-        json.dumps(signature, ensure_ascii=False, sort_keys=True).encode()
-    ).hexdigest()
-    directory = root / "cards"
-    directory.mkdir(parents=True, exist_ok=True)
-    output = directory / f"{digest}.png"
-    if output.exists():
-        output.touch()
-        return Card(output, WIDTH, height)
     image = Image.new("RGB", (WIDTH, height), BG)
     draw = ImageDraw.Draw(image)
     fonts = {}
@@ -124,22 +102,24 @@ def render_collection(
         locked = atlas and not pig["count"]
         if atlas:
             draw.rounded_rectangle(
-                (x, y, x + 114, y + 110), radius=18, fill="#ececec" if locked else "#ffffff"
+                (x, y, x + 114, y + 110), radius=18, fill="#e5e5e5" if locked else "#ffffff"
             )
             box_w, box_h = 96, 94
             cx, cy = x + 57, y + 55
+            if locked:
+                # Do not open or draw the hidden asset, including its silhouette or embedded text.
+                face = font(62, True)
+                draw.text((cx, cy - 1), "?", font=face, fill="#565656", anchor="mm")
+                continue
         else:
             draw.rounded_rectangle((x, y + 3, x + 224, y + 230), radius=23, fill=BORDER)
             draw.rounded_rectangle((x, y, x + 224, y + 227), radius=23, fill="#ffffff")
             draw.rounded_rectangle((x + 12, y + 12, x + 212, y + 154), radius=17, fill="#f9f4ed")
             box_w, box_h = 160, 128
             cx, cy = x + 112, y + 83
-        path = thumbnail(root / "assets" / pig["asset"], root / "thumbnails", locked)
-        with Image.open(path) as original:
-            art = original.convert("RGBA")
+        with Image.open(root / "assets" / pig["asset"]) as original:
+            art = ImageOps.exif_transpose(original).convert("RGBA")
             art.thumbnail((box_w, box_h), Image.Resampling.LANCZOS)
-            if locked:
-                art.putalpha(art.getchannel("A").point(lambda a: int(a * 0.60)))
             image.paste(art, (int(cx - art.width / 2), int(cy - art.height / 2)), art)
         if not atlas:
             text(pig["name"], cx, y + 163, 23, bold=True, width=198, center=True)
@@ -157,24 +137,162 @@ def render_collection(
     footer = top + rows * row_step + 12
     draw.line((56, footer, 1024, footer), fill=BORDER, width=2)
     if atlas:
-        text("彩色 · 已解锁    灰色 · 未解锁", 58, footer + 19, 17, SUB)
+        text("彩色 · 已解锁    问号 · 待发现", 58, footer + 19, 17, SUB)
     else:
         text("历史收藏会保留", 58, footer + 19, 17, SUB)
     text(f"{page:02d} / {pages:02d}", 888, footer + 16, 21, bold=True)
-    with tempfile.NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as file:
-        temp = Path(file.name)
-    try:
-        image.save(temp, "PNG")
-        temp.replace(output)
-    finally:
-        image.close()
-        temp.unlink(missing_ok=True)
-    return Card(output, WIDTH, height)
+    return finish(image)
+
+
+def finish(image: Image.Image) -> Card:
+    with image, io.BytesIO() as output:
+        image.save(output, "PNG")
+        return Card(output.getvalue(), image.width, image.height)
+
+
+class Canvas:
+    """Small shared drawing helpers for the two new cream cards."""
+
+    def __init__(self, width: int, height: int):
+        self.image = Image.new("RGB", (width, height), BG)
+        self.draw = ImageDraw.Draw(self.image)
+        self.fonts = {}
+
+    def font(self, size, bold=False):
+        if (size, bold) not in self.fonts:
+            face = ImageFont.truetype(str(FONT), size)
+            face.set_variation_by_axes([700 if bold else 400])
+            self.fonts[size, bold] = face
+        return self.fonts[size, bold]
+
+    def text(self, text, x, y, size=26, color=TEXT, bold=False, width=None):
+        text = str(text)
+        face = self.font(size, bold)
+        if width is not None and self.draw.textlength(text, font=face) > width:
+            while text and self.draw.textlength(text + "…", font=face) > width:
+                text = text[:-1]
+            text += "…"
+        self.draw.text((x, y), text, font=face, fill=color)
+
+    def wrap(self, text, size, width):
+        lines = []
+        for paragraph in str(text).split("\n"):
+            line = ""
+            for char in paragraph:
+                if line and self.draw.textlength(line + char, font=self.font(size)) > width:
+                    lines.append(line)
+                    line = ""
+                line += char
+            lines.append(line)
+        return lines
+
+
+def render_today(root: Path, name: str, result: dict, progress: dict, state: str) -> Card:
+    pig = result["pig"]
+    canvas = Canvas(WIDTH, 1)
+    description = " ".join(pig["description"].split())
+    analysis = " ".join(pig["analysis"].split())
+    lines = canvas.wrap(f"{description}\n\n{analysis}", 28, 880)
+    canvas.image.close()
+    description_y = 870
+    panel_bottom = description_y + 58 + 43 * len(lines)
+    canvas = Canvas(WIDTH, panel_bottom + 262)
+    canvas.text("PIGGY  /  DAILY", 58, 34, 18, ACCENT, True)
+    canvas.text("今日小猪", 54, 76, 56, bold=True)
+    canvas.text(name, 58, 158, 25, SUB, width=700)
+    canvas.text(result["day"], 826, 43, 19, SUB)
+    canvas.draw.rounded_rectangle((56, 222, 1024, 824), radius=32, fill="#ffffff")
+    canvas.draw.rounded_rectangle((84, 244, 994, 704), radius=25, fill="#f9f4ed")
+    with Image.open(root / "assets" / pig["asset"]) as original:
+        art = original.convert("RGBA")
+        art.thumbnail((580, 418), Image.Resampling.LANCZOS)
+        canvas.image.paste(art, ((WIDTH - art.width) // 2, 265 + (418 - art.height) // 2), art)
+        art.close()
+    canvas.text(pig["name"], 88, 734, 43, bold=True, width=566)
+    canvas.text(state, 674, 755, 22, ACCENT, width=314)
+    canvas.draw.rounded_rectangle((56, description_y, 1024, panel_bottom), radius=28, fill=PANEL)
+    for i, line in enumerate(lines):
+        canvas.text(line, 94, description_y + 26 + i * 43, 28)
+    y = panel_bottom + 35
+    for x, label, value in (
+        (68, "本猪累计", f"{result['count']} 次"),
+        (412, "累计收获", f"{progress['total']} 只"),
+        (735, "已解锁", f"{progress['unlocked']} / {progress['active_total']}"),
+    ):
+        canvas.text(label, x, y, 21, SUB)
+        canvas.text(value, x, y + 39, 35, bold=True, width=280)
+    ratio = progress["unlocked"] / progress["active_total"] if progress["active_total"] else 0
+    y += 111
+    canvas.draw.rounded_rectangle((68, y, 1012, y + 10), radius=5, fill=TRACK)
+    if ratio:
+        canvas.draw.rounded_rectangle(
+            (68, y, 68 + max(10, int(944 * min(ratio, 1))), y + 10), radius=5, fill=ACCENT
+        )
+    canvas.text("每天一只小猪，慢慢填满收藏。", 68, y + 34, 19, SUB)
+    return finish(canvas.image)
+
+
+def render_ranking(boards: dict, avatars: dict[str, bytes]) -> Card:
+    """Both top tens in one sheet; nickname and avatar share a pill."""
+    rows = max(1, *(len(boards[k][:10]) for k in ("species", "total")))
+    canvas = Canvas(1488, 312 + rows * 105 + 92)
+    canvas.text("PIGGY  /  LEADERBOARD", 56, 34, 18, ACCENT, True)
+    canvas.text("小猪排行榜", 52, 79, 56, bold=True)
+    canvas.text("本群玩家 · 跨群累计收藏（含下架收藏）", 58, 166, 24, SUB)
+    for column, (kind, label, unit) in enumerate(
+        (
+            ("species", "收集种类榜", "种"),
+            ("total", "累计数量榜", "只"),
+        )
+    ):
+        x = 48 + column * 704
+        canvas.draw.rounded_rectangle(
+            (x, 234, x + 688, canvas.image.height - 68), radius=28, fill=PANEL
+        )
+        canvas.text(label, x + 28, 250, 30, bold=True)
+        canvas.text("TOP 10", x + 548, 258, 21, ACCENT, True)
+        players = boards[kind][:10]
+        if not players:
+            canvas.text("还没有玩家上榜", x + 32, 337, 26, SUB)
+        for index, player in enumerate(players):
+            y = 313 + index * 105
+            rank = player["rank"]
+            color = {1: "#b58b43", 2: "#84949d", 3: "#b57d65"}.get(rank, SUB)
+            canvas.text(f"{rank:02d}", x + 24, y + 22, 29, color, True, width=64)
+            canvas.draw.rounded_rectangle(
+                (x + 91, y + 6, x + 507, y + 82), radius=38, fill="#ffffff"
+            )
+            avatar = avatars.get(player.get("open_id", ""))
+            if avatar:
+                with Image.open(io.BytesIO(avatar)) as source:
+                    art = ImageOps.fit(source.convert("RGB"), (60, 60))
+                mask = Image.new("L", (60, 60))
+                ImageDraw.Draw(mask).ellipse((0, 0, 59, 59), fill=255)
+                canvas.image.paste(art, (x + 99, y + 14), mask)
+                art.close()
+                mask.close()
+            else:
+                canvas.draw.ellipse((x + 99, y + 14, x + 159, y + 74), fill=TRACK)
+                canvas.text("猪", x + 115, y + 24, 27, ACCENT, True)
+            name = player.get("alias") or player.get("nickname") or f"玩家 {player['id']:04d}"
+            canvas.text(name, x + 176, y + 24, 25, bold=True, width=308)
+            value = f"{player[kind]} {unit}"
+            size = 30 if len(value) <= 7 else 23
+            text_width = canvas.draw.textlength(value, font=canvas.font(size, True))
+            canvas.text(
+                value, max(x + 521, x + 662 - text_width), y + 23, size, color, True, width=144
+            )
+    canvas.text("每天领一只小猪，把日子攒成一座猪圈。", 58, canvas.image.height - 46, 18, SUB)
+    return finish(canvas.image)
 
 
 def clean_cards(root: Path):
     """Discard only reproducible UI images that have not been used for a week."""
     threshold = time.time() - 7 * 86400
-    for path in (root / "cards").glob("*.png"):
-        if path.stat().st_mtime < threshold:
-            path.unlink(missing_ok=True)
+    for directory, suffix in (("cards", "*.png"), ("cards", "*.tmp"), ("thumbnails", "*.png")):
+        for path in (root / directory).glob(suffix):
+            try:
+                if path.stat().st_mtime < threshold:
+                    path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass

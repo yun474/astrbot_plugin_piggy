@@ -1,4 +1,40 @@
 {
+  "display": {
+    "description": "消息展示",
+    "type": "object",
+    "items": {
+      "draw": {
+        "description": "今日小猪使用图床",
+        "type": "bool",
+        "default": true,
+        "hint": "开启：图床图片 + Markdown + 按钮。关闭：内存渲染后直传 QQ，不带 MD 或按钮。"
+      },
+      "atlas": {
+        "description": "小猪图鉴使用图床",
+        "type": "bool",
+        "default": false,
+        "hint": "开启：图床图片 + Markdown + 按钮。关闭：内存渲染后直传 QQ，不带 MD 或按钮。"
+      },
+      "pen": {
+        "description": "我的猪圈使用图床",
+        "type": "bool",
+        "default": false,
+        "hint": "开启：图床图片 + Markdown + 按钮。关闭：内存渲染后直传 QQ，不带 MD 或按钮。"
+      },
+      "ranking": {
+        "description": "小猪排行使用图床",
+        "type": "bool",
+        "default": false,
+        "hint": "开启：图床图片 + Markdown + 按钮。关闭：内存渲染后直传 QQ，不带 MD 或按钮。"
+      }
+    },
+    "default": {
+      "draw": true,
+      "atlas": false,
+      "pen": false,
+      "ranking": false
+    }
+  },
   "provider": {
     "description": "图床类型",
     "type": "string",
@@ -44,12 +80,6 @@
     "type": "string",
     "default": "",
     "hint": "例如 https://img.example.com；需已绑定 R2 桶且无需登录即可下载。"
-  },
-  "key_prefix": {
-    "description": "图片对象目录",
-    "type": "string",
-    "default": "piggy",
-    "hint": "默认 piggy。只上传图片，不上传数据库或备份。"
   },
   "addressing_style": {
     "description": "S3 地址模式",
@@ -115,7 +145,7 @@
     "hint": "填 true、200 或 \"success\"，必须与返回字段类型一致。"
   },
   "upload_retry_count": {
-    "description": "图床上传失败重试次数",
+    "description": "图床 / QQ 本地上传失败重试次数",
     "type": "int",
     "default": 2,
     "hint": "不含首次请求；0=只尝试一次。仅重试网络异常、429 和服务端临时失败。"
@@ -155,5 +185,11 @@
     "type": "string",
     "default": "/",
     "hint": "应与 AstrBot 唤醒前缀一致，默认 /。群聊按官方规则填入输入框后由用户发送。"
+  },
+  "temp_cache_hours": {
+    "description": "临时卡片 URL 缓存（小时）",
+    "type": "int",
+    "default": 12,
+    "hint": "1–24 小时；建议 R2 对 piggy/temp/ 设置 7 天过期。此配置只管 URL 复用，不会设置图床删除规则。"
   }
 }

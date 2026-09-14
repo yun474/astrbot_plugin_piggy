@@ -23,6 +23,15 @@ def https_url(value: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    display: dict = field(
+        default_factory=lambda: {
+            "draw": True,
+            "atlas": False,
+            "pen": False,
+            "ranking": False,
+        }
+    )
+    temp_cache_hours: int = 12
     provider: str = "s3"
     endpoint: str = ""
     bucket: str = ""
@@ -30,7 +39,6 @@ class Settings:
     secret_key: str = field(default="", repr=False)
     region: str = "auto"
     public_base_url: str = ""
-    key_prefix: str = "piggy"
     addressing_style: str = "path"
     upload_url: str = ""
     upload_mode: str = "multipart"
@@ -61,6 +69,11 @@ class Settings:
                 except ValueError:
                     raise PiggyError(f"配置 {key} 必须是合法 JSON。") from None
         obj = cls(**values)
+        if not isinstance(obj.display, dict) or any(
+            key not in {"draw", "atlas", "pen", "ranking"} or type(value) is not bool
+            for key, value in obj.display.items()
+        ):
+            raise PiggyError("消息展示配置必须是四个功能的布尔开关。")
         for name, definition in cls.__dataclass_fields__.items():
             if definition.type is str and not isinstance(getattr(obj, name), str):
                 raise PiggyError(f"配置 {name} 必须为字符串。")
@@ -69,6 +82,7 @@ class Settings:
             ("image_retry_count", 0, 10),
             ("backup_keep", 1, 30),
             ("cache_ttl_hours", 1, 8760),
+            ("temp_cache_hours", 1, 24),
         ):
             value = getattr(obj, key)
             if type(value) is not int or not low <= value <= high:
@@ -96,10 +110,10 @@ class Settings:
             raise PiggyError("上传表单字段只能填写字符串或数值。")
         if any(c in obj.command_prefix for c in "\r\n") or len(obj.command_prefix) > 8:
             raise PiggyError("指令前缀长度不能超过 8，且不能包含换行。")
-        parts = obj.key_prefix.strip("/").split("/")
-        if any(p in {"", ".", ".."} for p in parts):
-            raise PiggyError("对象存储目录前缀不合法。")
         return obj
+
+    def use_host(self, command: str) -> bool:
+        return self.display.get(command, command == "draw")
 
     def check_host(self) -> None:
         if self.provider == "s3":

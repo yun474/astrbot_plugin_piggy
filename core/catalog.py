@@ -4,7 +4,7 @@ import re
 import shutil
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 from .config import PiggyError
 
@@ -88,30 +88,3 @@ def read_catalog(data_dir: Path) -> list[dict]:
     if not any(p["enabled"] for p in validated):
         raise PiggyError("至少保留一只启用的小猪；本次重载未生效。")
     return validated
-
-
-def thumbnail(source: Path, output_dir: Path, gray: bool) -> Path:
-    """Prepare a reusable image asset; final card layout is intentionally separate."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{source.stem}-{'gray' if gray else 'color'}-192-v1.png"
-    output = output_dir / name
-    if output.exists():
-        return output
-    with Image.open(source) as original:
-        img = ImageOps.exif_transpose(original).convert("RGBA")
-        img.thumbnail((192, 192), Image.Resampling.LANCZOS)
-        if gray:
-            alpha = img.getchannel("A")
-            img = ImageOps.grayscale(img).convert("RGBA")
-            img.putalpha(alpha)
-        # Unique temporary name avoids collisions between independent workers.
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(dir=output_dir, suffix=".png", delete=False) as f:
-            temp = Path(f.name)
-        try:
-            img.save(temp, "PNG")
-            temp.replace(output)
-        finally:
-            temp.unlink(missing_ok=True)
-    return output

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import sqlite3
 import tempfile
@@ -103,11 +104,12 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         hidden = await self.db.identify("app", "hidden", "group-other", "别群玩家")
         for user in (self.user, second, hidden):
             await self.db.draw(user["id"], "group-other", "event", now)
-        result = await self.db.ranking("app", "group-a", self.user["id"], "total")
-        self.assertEqual(len(result["players"]), 2)
-        self.assertEqual([p["rank"] for p in result["players"]], [1, 1])
+        result = await self.db.rankings("app", "group-a")
+        self.assertEqual(len(result["total"]), 2)
+        self.assertEqual([p["rank"] for p in result["total"]], [1, 1])
+        self.assertEqual({p["open_id"] for p in result["total"]}, {"member", "second"})
         with self.assertRaises(PiggyError):
-            await self.db.ranking("app", "a", self.user["id"], "total;DROP TABLE users")
+            await self.db.rankings("app", "")
 
     async def test_bad_manifest_does_not_replace_catalog(self):
         definitions = json.loads(self.manifest.read_text())
@@ -160,7 +162,7 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(count, 0)
 
-    async def test_atlas_renders_all_pigs_without_names_and_uses_gray_for_locked(self):
+    async def test_atlas_renders_all_slots_without_names_and_hides_locked_pigs(self):
         await self.db.draw(self.user["id"], "group-a", "draw")
         progress = await self.db.collection(self.user["id"])
         labels = []
@@ -171,12 +173,14 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
             return draw_text(canvas, xy, text, *args, **kwargs)
 
         with patch.object(ImageDraw.ImageDraw, "text", record_text):
-            message = await collection_message(Settings(), self.root, self.user, progress, 1, True)
+            message = await collection_message(
+                Settings(display={"atlas": True}), self.root, self.user, progress, 1, True
+            )
         self.assertEqual(len(message.images), 1)
         for pig in progress["entries"]:
             self.assertNotIn(pig["name"], labels)
         self.assertIn("已解锁 1 / 2", labels)
-        with Image.open(message.images[0]) as img:
+        with Image.open(io.BytesIO(message.images[0])) as img:
             self.assertEqual(img.width, 1080)
             for i, pig in enumerate(progress["entries"]):
                 r, g, b = img.getpixel((113 + 122 * i, 439))
@@ -188,13 +192,25 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PiggyError):
             await collection_message(Settings(), self.root, self.user, progress, 0, True)
         with self.assertRaises(PiggyError):
-            await collection_message(Settings(), self.root, self.user, progress, 2, True)
+            await collection_message(
+                Settings(display={"atlas": True}), self.root, self.user, progress, 2, True
+            )
+
+    async def test_locked_atlas_does_not_read_assets_or_reveal_changes_to_them(self):
+        progress = await self.db.collection(self.user["id"])
+        before = await collection_message(Settings(), self.root, self.user, progress, 1, True)
+        for pig in progress["entries"]:
+            pig["asset"] = "hidden-does-not-exist.png"
+            pig["name"] = "不可泄露的猪名"
+        after = await collection_message(Settings(), self.root, self.user, progress, 1, True)
+        self.assertEqual(before.images, after.images)
 
     async def test_pen_only_renders_owned_names_and_empty_pen_is_a_card(self):
         progress = await self.db.collection(self.user["id"])
         empty = await collection_message(Settings(), self.root, self.user, progress, 1, False)
         self.assertEqual(len(empty.images), 1)
-        self.assertTrue(empty.images[0].is_file())
+        self.assertTrue(empty.images[0].startswith(b"\x89PNG"))
+        self.assertFalse((self.root / "cards").exists())
         await self.db.draw(self.user["id"], "a", "draw")
         progress = await self.db.collection(self.user["id"])
         labels = []
@@ -214,12 +230,16 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         template = progress["entries"][0]
         progress["entries"] = [{**template, "id": f"pig-{i}"} for i in range(96)]
         progress["active_total"] = 96
-        one = await collection_message(Settings(), self.root, self.user, progress, 1, True)
+        one = await collection_message(
+            Settings(display={"atlas": True}), self.root, self.user, progress, 1, True
+        )
         self.assertEqual(len(one.images), 1)
         self.assertEqual(len(one.keyboard["content"]["rows"]), 2)
         progress["entries"] += [{**template, "id": f"extra-{i}"} for i in range(100)]
         progress["active_total"] = 196
-        last = await collection_message(Settings(), self.root, self.user, progress, 2, True)
+        last = await collection_message(
+            Settings(display={"atlas": True}), self.root, self.user, progress, 2, True
+        )
         self.assertEqual(
             last.keyboard["content"]["rows"][-1]["buttons"][0]["action"]["data"], "/小猪图鉴 1"
         )
@@ -312,20 +332,27 @@ class ConfigAndButtonsTests(unittest.TestCase):
             {"id": i, "nickname": f"玩家{i:02d}", "rank": i, "species": 20 - i, "total": 50 - i}
             for i in range(1, 13)
         ]
-        for kind in ("species", "total"):
+        labels = []
+        original = ImageDraw.ImageDraw.text
+
+        def record(canvas, xy, text, *args, **kwargs):
+            labels.append(str(text))
+            return original(canvas, xy, text, *args, **kwargs)
+
+        with patch.object(ImageDraw.ImageDraw, "text", record):
             message = ranking_message(
-                Settings(), user, {"players": players, "mine": players[-1], "kind": kind}
+                Settings(display={"ranking": True}),
+                user,
+                {"species": players, "total": players},
+                {},
             )
-            self.assertIn("玩家10", message.text)
-            self.assertNotIn("玩家11", message.text)
-            self.assertNotIn("玩家12", message.text)
-            self.assertNotIn("页", message.text)
-            rows = message.keyboard["content"]["rows"]
-            self.assertEqual(len(rows), 3)
-            self.assertEqual(
-                [b["action"]["data"] for b in rows[-1]["buttons"]],
-                ["/小猪排行 种类", "/小猪排行 数量"],
-            )
+        self.assertEqual(labels.count("玩家10"), 2)
+        self.assertNotIn("玩家11", labels)
+        self.assertNotIn("玩家12", labels)
+        self.assertIn("收集种类榜", labels)
+        self.assertIn("累计数量榜", labels)
+        self.assertEqual(len(message.keyboard["content"]["rows"]), 2)
+        self.assertFalse(message.local)
 
     def test_json_config_and_retry_validation(self):
         settings = Settings.from_dict(

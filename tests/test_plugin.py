@@ -100,6 +100,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             "image_retry_count": 0,
         }
         self.plugin = self.module.PiggyPlugin(object(), self.config)
+        self.plugin.transport.upload_image = AsyncMock(return_value="qq-image-info")
+        self.plugin.avatars.get_many = AsyncMock(return_value={})
         self.plugin.transport.request = AsyncMock(return_value={"id": "sent"})
         self.plugin.publisher.host.upload = AsyncMock(
             return_value="https://img.example.com/pig.png"
@@ -129,8 +131,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["alias"], "自定义称呼")
         for call in self.plugin.transport.request.await_args_list:
             payload = call.args[1]
-            self.assertEqual(payload["msg_type"], 2)
-            self.assertTrue(payload["markdown"]["force_verify_image_resource"])
+            if payload["msg_type"] == 2:
+                self.assertTrue(payload["markdown"]["force_verify_image_resource"])
+            else:
+                self.assertIn(payload["msg_type"], (0, 7))
+                self.assertNotIn("keyboard", payload)
+                self.assertNotIn("markdown", payload)
 
     async def test_upload_failure_keeps_draw_and_next_command_displays_same_pig(self):
         from astrbot_plugin_piggy.core.storage import UploadError
@@ -151,6 +157,63 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.draw(OfficialEvent())
         user = await self.plugin.db.identify("app", "member", "a", "")
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 0)
+
+    async def test_every_command_works_without_host_and_switching_keeps_daily_record(self):
+        from astrbot_plugin_piggy.core.config import Settings
+
+        config = Settings(display={"draw": False})
+        self.plugin.settings = self.plugin.sender.settings = config
+        self.plugin.publisher.publish = AsyncMock(side_effect=AssertionError("No host expected"))
+        for command in (self.plugin.draw, self.plugin.atlas, self.plugin.pen, self.plugin.ranking):
+            await command(OfficialEvent(command.__name__))
+            payload = self.plugin.transport.request.await_args.args[1]
+            self.assertEqual(payload["msg_type"], 7)
+            self.assertNotIn("keyboard", payload)
+            self.assertNotIn("markdown", payload)
+        self.plugin.publisher.publish.assert_not_awaited()
+        self.assertFalse((self.root / "cards").exists())
+        self.assertFalse((self.root / "thumbnails").exists())
+        user = await self.plugin.db.identify("app", "member", "group-a", "")
+        self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
+        config = Settings.from_dict(
+            {**self.config, "display": dict.fromkeys(("draw", "atlas", "pen", "ranking"), True)}
+        )
+        self.plugin.settings = self.plugin.sender.settings = config
+        self.plugin.publisher.publish = AsyncMock(return_value="https://images.example.com/p.png")
+        for command in (self.plugin.draw, self.plugin.atlas, self.plugin.pen, self.plugin.ranking):
+            await command(OfficialEvent("hosted-" + command.__name__))
+            payload = self.plugin.transport.request.await_args.args[1]
+            self.assertEqual(payload["msg_type"], 2)
+            self.assertIn("keyboard", payload)
+        self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
+
+    async def test_local_upload_failure_preserves_collection(self):
+        from astrbot_plugin_piggy.core.config import Settings
+        from astrbot_plugin_piggy.core.delivery import QQError
+
+        self.plugin.settings = self.plugin.sender.settings = Settings(display={"draw": False})
+        self.plugin.transport.upload_image.side_effect = QQError(123, 401)
+        await self.plugin.draw(OfficialEvent("failed-local"))
+        self.assertIn(
+            "QQ 本地图片上传失败", self.plugin.transport.request.await_args.args[1]["content"]
+        )
+        self.plugin.transport.upload_image.side_effect = None
+        await self.plugin.draw(OfficialEvent("retry-local"))
+        user = await self.plugin.db.identify("app", "member", "group-a", "")
+        self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
+
+    async def test_cleanup_runs_independently_after_backup_failure(self):
+        self.plugin.db.backup = AsyncMock(side_effect=OSError("backup disk unavailable"))
+        self.plugin.db.prune_cache = AsyncMock()
+        with patch("asyncio.sleep", side_effect=asyncio.CancelledError):
+            with self.assertLogs("piggy-tests", level="ERROR"):
+                with self.assertRaises(asyncio.CancelledError):
+                    await self.plugin._backups()
+            with patch.object(self.module, "clean_cards") as clean:
+                with self.assertRaises(asyncio.CancelledError):
+                    await self.plugin._cleanup()
+                clean.assert_called_once_with(self.root)
+        self.plugin.db.prune_cache.assert_awaited_once()
 
     async def test_diagnose_bypasses_url_cache_and_logs_upload_details(self):
         from astrbot_plugin_piggy.core.storage import UploadError

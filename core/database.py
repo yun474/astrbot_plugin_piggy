@@ -230,31 +230,31 @@ class Database:
 
         return await self.run(read)
 
-    async def ranking(self, app_id: str, group_id: str, user_id: int, kind: str) -> dict:
-        if kind not in {"species", "total"}:
-            raise PiggyError("排行类型只能为种类或数量。")
+    async def rankings(self, app_id: str, group_id: str) -> dict:
         if not group_id:
             raise PiggyError("请在群里查看本群玩家排行。")
 
         def read(conn):
             rows = conn.execute(
-                f"""
+                """
                 WITH scores AS (
-                    SELECT u.id,u.nickname,u.alias,count(c.pig_id) species,coalesce(sum(c.count),0) total
+                    SELECT u.id,u.open_id,u.nickname,u.alias,count(c.pig_id) species,coalesce(sum(c.count),0) total
                     FROM group_players g JOIN users u ON u.id=g.user_id
                     LEFT JOIN collections c ON c.user_id=u.id
                     WHERE g.app_id=? AND g.group_id=? GROUP BY u.id
                 ), ranked AS (
-                    SELECT *,RANK() OVER (ORDER BY {kind} DESC) AS rank FROM scores
-                ) SELECT * FROM ranked ORDER BY {kind} DESC,id
+                    SELECT *,RANK() OVER (ORDER BY species DESC) AS species_rank,
+                    RANK() OVER (ORDER BY total DESC) AS total_rank FROM scores
+                ) SELECT * FROM ranked
             """,
                 (app_id, group_id),
             ).fetchall()
-            players = [dict(row) for row in rows]
             return {
-                "players": players,
-                "mine": next((p for p in players if p["id"] == user_id), None),
-                "kind": kind,
+                kind: [
+                    {**dict(row), "rank": row[f"{kind}_rank"]}
+                    for row in sorted(rows, key=lambda row: (-row[kind], row["id"]))[:10]
+                ]
+                for kind in ("species", "total")
             }
 
         return await self.run(read)
@@ -298,8 +298,8 @@ class Database:
         def prune(conn):
             conn.execute("DELETE FROM deliveries WHERE updated_at<?", (time.time() - 30 * 86400,))
             conn.execute(
-                "DELETE FROM image_cache WHERE uploaded_at<?",
-                (time.time() - 366 * 86400,),
+                "DELETE FROM image_cache WHERE uploaded_at<? OR (namespace LIKE '%:v2:temp/%' AND uploaded_at<?)",
+                (time.time() - 366 * 86400, time.time() - 2 * 86400),
             )
 
         await self.run(prune)

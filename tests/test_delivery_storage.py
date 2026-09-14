@@ -309,6 +309,7 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
             host = S3Host(cfg)
             host.client = Mock()
             host.client.put_object.side_effect = error
+            host.directories_ready = True
             with self.assertRaises(UploadError) as raised:
                 await host.upload(b"image", "piggy/a.png", "image/png")
             failure = raised.exception
@@ -334,6 +335,8 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
 
         async def upload(request):
             requests.append((request.path, await request.read(), dict(request.headers)))
+            if request.path.endswith("/"):
+                return web.Response(status=200)
             return web.Response(
                 status=403,
                 text="<Error><Code>SignatureDoesNotMatch</Code><Message>signature invalid</Message><RequestId>r2-request-123</RequestId></Error>",
@@ -358,8 +361,12 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("request_id=r2-request-123", raised.exception.diagnostic)
             self.assertIn("http_status=403", raised.exception.diagnostic)
             self.assertFalse(raised.exception.retryable)
-            self.assertEqual(len(requests), 1)
-            self.assertEqual(requests[0][:2], ("/pigs/piggy/a.png", b"image"))
+            self.assertEqual(len(requests), 3)
+            self.assertEqual(
+                [r[:2] for r in requests[:2]],
+                [("/pigs/piggy/assets/", b""), ("/pigs/piggy/temp/", b"")],
+            )
+            self.assertEqual(requests[-1][:2], ("/pigs/piggy/a.png", b"image"))
             self.assertIn("AWS4-HMAC-SHA256", requests[0][2]["Authorization"])
             self.assertNotIn("x-amz-acl", {k.lower() for k in requests[0][2]})
         finally:
@@ -376,6 +383,8 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
             aws_secret_access_key="test",
         )
         with Stubber(client) as stub, patch("boto3.client", return_value=client) as factory:
+            stub.add_response("put_object", {"ETag": "folder"})
+            stub.add_response("put_object", {"ETag": "folder"})
             stub.add_response("put_object", {"ETag": "hash"})
             await host.upload(b"image", "piggy/image.png", "image/png")
             config = factory.call_args.kwargs["config"]
@@ -424,6 +433,18 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
             "CacheControl": "public, max-age=31536000, immutable",
         }
         with Stubber(client) as stub:
+            for prefix in ("piggy/assets/", "piggy/temp/"):
+                stub.add_response(
+                    "put_object",
+                    {"ETag": "folder"},
+                    {
+                        "Bucket": "pigs",
+                        "Key": prefix,
+                        "Body": b"",
+                        "ContentType": "application/x-directory",
+                        "CacheControl": "no-store",
+                    },
+                )
             stub.add_response("put_object", {"ETag": "hash"}, expected)
             self.assertEqual(
                 await host.upload(b"image", "piggy/image.png", "image/png"),

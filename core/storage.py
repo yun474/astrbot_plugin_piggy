@@ -15,6 +15,10 @@ from .config import PiggyError, Settings, https_url
 from .database import Database
 from .diagnostics import safe_detail
 
+ROOT_PREFIX = "piggy/"
+ASSET_PREFIX = ROOT_PREFIX + "assets/"
+TEMP_PREFIX = ROOT_PREFIX + "temp/"
+
 
 class UploadError(PiggyError):
     def __init__(self, message: str, retryable: bool = False, *, diagnostic: str = ""):
@@ -33,6 +37,7 @@ class S3Host:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = None
+        self.directories_ready = False
 
     async def upload(self, data: bytes, key: str, content_type: str) -> str:
         import boto3
@@ -85,13 +90,28 @@ class S3Host:
                     ),
                 )
             # No ACL: R2 does not implement x-amz-acl. Public access is bucket/domain configuration.
+            if not self.directories_ready:
+                for folder in (ASSET_PREFIX, TEMP_PREFIX):
+                    stage = f"create_directory:{folder}"
+                    self.client.put_object(
+                        Bucket=self.settings.bucket,
+                        Key=folder,
+                        Body=b"",
+                        ContentType="application/x-directory",
+                        CacheControl="no-store",
+                    )
+                self.directories_ready = True
             stage = "put_object"
             self.client.put_object(
                 Bucket=self.settings.bucket,
                 Key=key,
                 Body=data,
                 ContentType=content_type,
-                CacheControl="public, max-age=31536000, immutable",
+                CacheControl=(
+                    "public, max-age=3600"
+                    if key.startswith(TEMP_PREFIX)
+                    else "public, max-age=31536000, immutable"
+                ),
             )
 
         try:
@@ -263,32 +283,40 @@ class ImagePublisher:
         self.namespace = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         self.lock = asyncio.Lock()
 
-    async def publish(self, path: Path, force: bool = False, deadline: float | None = None) -> str:
+    async def publish(
+        self, path: Path | bytes, force: bool = False, deadline: float | None = None
+    ) -> str:
         self.settings.check_host()
+        temporary = isinstance(path, bytes)
         try:
-            data = await asyncio.to_thread(path.read_bytes)
+            data = path if temporary else await asyncio.to_thread(path.read_bytes)
         except OSError:
             raise PiggyError("本地图片读取失败，请检查素材目录。") from None
         if not 0 < len(data) <= 10 * 1024 * 1024:
             raise PiggyError("图片为空或超过 10 MB。")
         digest = hashlib.sha256(data).hexdigest()
+        ttl = (
+            self.settings.temp_cache_hours if temporary else self.settings.cache_ttl_hours
+        ) * 3600
+        # Rotate temporary keys so an object approaching lifecycle expiry is never reused.
+        folder = f"temp/{int(time.time() // ttl)}" if temporary else "assets"
+        namespace = f"{self.namespace}:v2:{folder}"
         async with self.lock:
-            cached = await self.db.cache_get(self.namespace, digest)
-            if (
-                cached
-                and not force
-                and time.time() - cached["uploaded_at"] < self.settings.cache_ttl_hours * 3600
-            ):
+            cached = await self.db.cache_get(namespace, digest)
+            if cached and not force and time.time() - cached["uploaded_at"] < ttl:
                 return cached["url"]
-            key = f"{self.settings.key_prefix.strip('/')}/{digest}{path.suffix.lower()}"
-            content_type = mimetypes.guess_type(path.name)[0] or "image/png"
+            suffix = ".png" if temporary else path.suffix.lower()
+            key = f"{ROOT_PREFIX}{folder}/{digest}{suffix}"
+            content_type = (
+                "image/png" if temporary else (mimetypes.guess_type(path.name)[0] or "image/png")
+            )
             for attempt in range(self.settings.upload_retry_count + 1):
                 if deadline is not None and time.monotonic() >= deadline:
                     raise PiggyError("图片上传超过本次回复时限，请再次发送指令。")
                 try:
                     url = await self.host.upload(data, key, content_type)
                     https_url(url)
-                    await self.db.cache_put(self.namespace, digest, key, url)
+                    await self.db.cache_put(namespace, digest, key, url)
                     return url
                 except UploadError as exc:
                     exc.attempt = attempt + 1

@@ -11,6 +11,7 @@ from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
     QQOfficialMessageEvent,
 )
 
+from .core.avatars import Avatars
 from .core.catalog import initialize_catalog, read_catalog
 from .core.config import PiggyError, Settings
 from .core.database import Database
@@ -18,7 +19,7 @@ from .core.delivery import Message, QQError, QQTransport, Sender, message_key
 from .core.diagnostics import exception_detail
 from .core.rendering import clean_cards
 from .core.storage import ImagePublisher, UploadError
-from .core.views import collection_message, keyboard, ranking_message, today_message
+from .core.views import collection_message, ranking_message, today_message
 
 
 @register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集", "0.0.0")
@@ -31,12 +32,14 @@ class PiggyPlugin(Star):
         self.publisher = ImagePublisher(self.settings, self.db)
         self.transport = QQTransport(self.settings.request_timeout)
         self.sender = Sender(self.settings, self.db, self.publisher, self.transport)
+        self.avatars = Avatars()
         self.ready = False
         self.init_lock = asyncio.Lock()
         self.maintenance_lock = asyncio.Lock()
         self.limit = asyncio.Semaphore(3)
         self.inflight = {}
         self.backup_task = None
+        self.cleanup_task = None
 
     async def initialize(self):
         async with self.init_lock:
@@ -56,20 +59,30 @@ class PiggyPlugin(Star):
                 logger.error("[piggy] Catalog reload rejected, keeping previous catalog: %s", exc)
             self.ready = True
             self.backup_task = asyncio.create_task(self._backups())
+            self.cleanup_task = asyncio.create_task(self._cleanup())
 
     async def _backups(self):
         while True:
             try:
                 async with self.maintenance_lock:
                     await self.db.backup(self.settings.backup_keep)
-                    await self.db.prune_cache()
-                    await asyncio.to_thread(clean_cards, self.root)
             except Exception as exc:
                 logger.error(
                     "[piggy] Scheduled backup failed (%s); original database retained.",
                     type(exc).__name__,
                 )
             await asyncio.sleep(86400)
+
+    async def _cleanup(self):
+        while True:
+            try:
+                await self.db.prune_cache()
+                await asyncio.to_thread(clean_cards, self.root)
+            except Exception as exc:
+                logger.warning(
+                    "[piggy] Cache cleanup failed: %s", exception_detail(exc, self.settings)
+                )
+            await asyncio.sleep(3600)
 
     async def _handle(self, event: AstrMessageEvent, command: str, args: tuple = ()):
         if not isinstance(event, QQOfficialMessageEvent) or not event.get_group_id():
@@ -116,11 +129,13 @@ class PiggyPlugin(Star):
                     app_id, event.get_sender_id(), event.get_group_id(), nickname
                 )
                 if command == "draw":
-                    self.settings.check_host()
+                    if self.settings.use_host(command):
+                        self.settings.check_host()
                     result = await self.db.draw(
                         user["id"], event.get_group_id(), event.message_obj.message_id
                     )
-                    message = today_message(
+                    message = await asyncio.to_thread(
+                        today_message,
                         self.settings,
                         self.root,
                         user,
@@ -140,19 +155,16 @@ class PiggyPlugin(Star):
                     kind = args[0]
                     if kind not in {"种类", "数量"}:
                         raise PiggyError("用法：小猪排行 种类/数量")
-                    result = await self.db.ranking(
-                        app_id,
-                        event.get_group_id(),
-                        user["id"],
-                        "species" if kind == "种类" else "total",
+                    boards = await self.db.rankings(app_id, event.get_group_id())
+                    avatars = await self.avatars.get_many(
+                        app_id, boards["species"] + boards["total"]
                     )
-                    message = ranking_message(self.settings, user, result)
+                    message = await asyncio.to_thread(
+                        ranking_message, self.settings, user, boards, avatars
+                    )
                 elif command == "alias":
                     await self.db.set_alias(user["id"], args[0])
-                    message = Message(
-                        "称呼已经保存啦。",
-                        keyboard=keyboard(self.settings, user["open_id"]),
-                    )
+                    message = Message("称呼已经保存啦。")
                 elif command == "reload":
                     async with self.maintenance_lock:
                         pigs = await asyncio.to_thread(read_catalog, self.root)
@@ -255,11 +267,13 @@ class PiggyPlugin(Star):
         await self._handle(event, "diagnose")
 
     async def terminate(self):
-        if self.backup_task:
-            self.backup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.backup_task
+        for task in (self.backup_task, self.cleanup_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         if self.inflight:
             await asyncio.gather(*self.inflight.values(), return_exceptions=True)
         await self.publisher.close()
         await self.transport.close()
+        await self.avatars.close()
