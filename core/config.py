@@ -121,6 +121,7 @@ class Settings:
             "shop": False,
             "duel": False,
             "wild": False,
+            "raid": False,
         }
     )
     temp_cache_hours: int = 12
@@ -212,7 +213,7 @@ class Settings:
                     raise PiggyError(f"配置 {key} 必须是合法 JSON。") from None
         obj = cls(**values)
         if not isinstance(obj.display, dict) or any(
-            key not in {"draw", "atlas", "pen", "ranking", "shop", "duel", "wild"}
+            key not in {"draw", "atlas", "pen", "ranking", "shop", "duel", "wild", "raid"}
             or type(value) is not bool
             for key, value in obj.display.items()
         ):

@@ -9,12 +9,14 @@ from .battle import STAT_NAMES, STATS, describe_skill, entry_for, fighter, level
 from .config import PiggyError, Settings
 from .database import EAST_ASIA
 from .delivery import Message
+from .raid import DUNGEONS, PARTY_SIZE, REST_HEAL, TIMEOUT_MINUTES, mechanics_for
 from .rendering import (
     ATLAS_SHEET_SIZE,
     PEN_SHEET_SIZE,
     render_collection,
     render_duel_history,
     render_duel_poster,
+    render_raid_poster,
     render_ranking,
     render_shop,
     render_today,
@@ -62,6 +64,7 @@ def keyboard(
                 button("小猪排行", "小猪排行"),
                 button("我的猪圈", "我的猪圈"),
                 button("小猪商店", "小猪商店"),
+                button("猪副本", "猪副本"),
             ]
         },
         {
@@ -184,6 +187,233 @@ async def wild_battle_message(settings: Settings, root: Path, result: dict) -> M
     card = await asyncio.to_thread(render_duel_poster, root, poster)
     buttons = [("今日小猪", "今日小猪")] if result["won"] else [("挑战小猪", "挑战小猪 ")]
     return card_message(settings, user, card, "野猪挑战", "wild", buttons=buttons)
+
+
+def _expired_notice(expired: list) -> list[str]:
+    notes = []
+    for raid in expired:
+        name = raid["dungeon"]["name"]
+        if raid["status"] == "cancelled":
+            notes.append(f"上一支「{name}」队伍 {TIMEOUT_MINUTES} 分钟内没凑满 4 人，已自动取消。")
+        else:
+            notes.append(f"上一支「{name}」队伍的队长没有及时决定，已自动撤退。")
+    return notes
+
+
+def _raid_members(raid: dict) -> list[str]:
+    return [
+        f"{index}. {'队长 ' if m['user_id'] == raid['leader'] else ''}{display_name(m['user'])}"
+        f"：{m['pig']['name']}"
+        for index, m in enumerate(raid["members"], 1)
+    ]
+
+
+def raid_list_message(settings: Settings, user: dict, status: dict) -> Message:
+    blocks = _expired_notice(status["expired"])
+    names = status["bosses"]
+    for item in DUNGEONS:
+        state = "今天已打过" if item["key"] in status["done"] else "今天可挑战"
+        blocks.append(f"【{item['key']} {item['name']}】{item['intro']}（{state}）")
+        lines = []
+        for stage, slot in enumerate(item["bosses"], 1):
+            mechanics = mechanics_for(slot).MECHANICS
+            lines.append(f"第 {stage} 关 {names[slot]}")
+            lines += [f"　{name}：{text}" for name, text in mechanics]
+        blocks.append(lines)
+    raid = status["raid"]
+    if raid:
+        minutes = max(1, math.ceil((raid["expires_at"] - status["now"]) / 60))
+        if raid["status"] == "forming":
+            blocks.append(
+                f"本群正在组队：「{raid['dungeon']['name']}」{len(raid['members'])}/{PARTY_SIZE}，"
+                f"约 {minutes} 分钟后过期，发送「加入副本 你的小猪」加入"
+            )
+        else:
+            blocks.append(
+                f"本群的「{raid['dungeon']['name']}」队伍已打完第 {raid['stage']} 关，"
+                f"等队长决定继续还是撤退（约 {minutes} 分钟）"
+            )
+        blocks.append(_raid_members(raid))
+    blocks.append(
+        [
+            "开启副本 编号 你的小猪 —— 发起组队，例如：开启副本 1 猪人",
+            "加入副本 你的小猪 —— 加入本群正在组队的队伍，满 4 人自动出发",
+            f"组队 {TIMEOUT_MINUTES} 分钟内没满 4 人自动取消；开打后不能中途加入",
+            "每关打赢：每位队员各得 1 只 boss 猪，本群所有玩家各得 1 次再抽",
+            "战斗中倒下的猪，主人失去 1 只；每个副本每人每天 1 次",
+        ]
+    )
+    return text_message(
+        settings,
+        "猪副本",
+        blocks,
+        buttons=[("开启副本", "开启副本 "), ("加入副本", "加入副本 ")],
+    )
+
+
+def raid_lobby_message(settings: Settings, result: dict, kind: str) -> Message:
+    raid = result["raid"]
+    name = raid["dungeon"]["name"]
+    blocks = _expired_notice(result.get("expired", []))
+    if kind == "cancelled":
+        return text_message(
+            settings, f"「{name}」队伍已解散", blocks + ["队长退出了，组队取消，不扣次数。"]
+        )
+    if kind == "retreated":
+        return text_message(
+            settings,
+            f"「{name}」撤退成功",
+            blocks
+            + [
+                f"队伍打完第 {raid['stage']} 关后选择撤退，已得到的 boss 猪和再抽机会都保留着。",
+                _raid_members(raid),
+            ],
+            buttons=[("猪副本", "猪副本")],
+        )
+    minutes = max(1, math.ceil((raid["expires_at"] - result["now"]) / 60))
+    count = len(raid["members"])
+    title = {
+        "open": f"「{name}」开始组队！",
+        "join": f"加入了「{name}」队伍",
+        "leave": f"有人退出了「{name}」队伍",
+    }[kind]
+    blocks += [
+        f"组队中 {count}/{PARTY_SIZE} · 约 {minutes} 分钟后没满员自动取消",
+        _raid_members(raid),
+        f"还差 {PARTY_SIZE - count} 人，发送「加入副本 你的小猪」加入，满 {PARTY_SIZE} 人自动开打第一关。",
+    ]
+    return text_message(
+        settings,
+        title,
+        blocks,
+        buttons=[("加入副本", "加入副本 "), ("退出副本", "退出副本")],
+    )
+
+
+async def raid_battle_message(settings: Settings, root: Path, battle: dict) -> Message:
+    raid, boss, result = battle["raid"], battle["boss"], battle["result"]
+    info = raid["dungeon"]
+    leader = display_name(raid["leader_user"])
+    stages = len(info["bosses"])
+    party = [
+        {
+            "owner": display_name(f["user"]),
+            "pig": f["pig"]["name"],
+            "asset": f["pig"]["asset"],
+            "level": f["level"],
+            "style": f["style"],
+            "hp": f["hp"],
+            "max_hp": f["max_hp"],
+            "state": "alive" if f["alive"] else "fallen",
+        }
+        for f in battle["fighters"]
+    ]
+    party += [
+        {
+            "owner": display_name(m["user"]),
+            "pig": m["pig"]["name"],
+            "asset": m["pig"]["asset"],
+            "level": 0,
+            "style": style,
+            "state": state,
+        }
+        for key, state, style in (
+            ("retired", "fallen", "前几关已倒下"),
+            ("absent", "absent", "猪不在猪圈里"),
+        )
+        for m in battle[key]
+    ]
+    ally = battle["ally"]
+    if ally:
+        party.append(
+            {
+                "owner": "路过的野生小猪",
+                "pig": ally["pig"]["name"],
+                "asset": ally["pig"]["asset"],
+                "level": ally["level"],
+                "style": ally["style"],
+                "hp": ally["hp"],
+                "max_hp": ally["max_hp"],
+                "state": "ally",
+            }
+        )
+    events = [f"【{e['kind']}·{e['name']}】{e['text']}" for e in battle["events"]]
+    if result and result["field_events"]:
+        events.append("【场地事件】战斗中触发了：" + "、".join(result["field_events"]))
+    if not result:
+        headline = "没有能出战的小猪，副本结束"
+    elif battle["won"]:
+        headline = f"击败了 {boss['label']}！"
+    elif result["timeout"]:
+        headline = f"{result['rounds']} 回合没能打倒 {boss['label']}，队伍撤出战斗"
+    else:
+        headline = f"团灭了……{boss['label']} 获胜"
+    settlement = []
+    for user, changes in battle["changes"]:
+        text = "；".join(_level_text(c) for c in changes) if changes else "没有变化"
+        settlement.append(f"{display_name(user)}：{text}")
+    if battle["copies"] > 1:
+        settlement.append(f"宝箱怪兑现了承诺：每位队员得到 {battle['copies']} 只 boss 猪")
+    if battle["chest"]:
+        settlement.append(f"宝箱：每位队员额外得到 {battle['chest']} 只随机小猪")
+    if battle["bonus"]:
+        settlement.append(
+            f"本群 {battle['rewarded']} 位玩家各获得 {battle['bonus']} 次再抽机会，"
+            "今天再发「今日小猪」即可使用"
+        )
+    status = battle["status"]
+    if status == "waiting":
+        next_step = (
+            f"第 {battle['stage']} 关通关！队长 {leader} 发送「继续副本」挑战第 {battle['stage'] + 1} 关"
+            f"「{battle['next_boss']}」，或发送「撤退副本」带着奖励离开。存活的猪会先回复 {REST_HEAL:.0%} 生命；"
+            f"{TIMEOUT_MINUTES} 分钟内不决定自动撤退。"
+        )
+    elif status == "cleared":
+        next_step = f"「{info['name']}」三关全部通关！恭喜全队，明天还能再来。"
+    elif battle["won"]:
+        next_step = "boss 倒下了，但队员全部倒下，副本到此结束。"
+    else:
+        next_step = "副本失败，到此结束。可以换一个副本，或者明天再来。"
+    rounds = f" · {result['rounds']} 回合" if result else ""
+    poster = {
+        "title": f"{info['name']} · 第 {battle['stage']}/{stages} 关",
+        "subtitle": f"{battle['day']} · 队长 {leader}{rounds}",
+        "boss": {
+            "name": boss["label"],
+            "asset": boss["pig"]["asset"],
+            "level": boss["level"],
+            "style": boss["style"],
+            "hp": boss["hp"],
+            "max_hp": boss["max_hp"],
+            "defeated": battle["won"],
+            "mechanics": [
+                (name, text, index == boss["disabled"])
+                for index, (name, text) in enumerate(boss["mechanics"])
+            ],
+        },
+        "party": party,
+        "events": events,
+        "headline": headline,
+        "log": result["log"] if result else [],
+        "settlement": settlement,
+        "next": next_step,
+        "footer": f"发送「猪副本」查看副本和 boss 机制 · 每个副本每人每天 1 次 · 第 #{battle['id']} 场",
+    }
+    card = await asyncio.to_thread(render_raid_poster, root, poster)
+    buttons = (
+        [("继续副本", "继续副本"), ("撤退副本", "撤退副本")]
+        if status == "waiting"
+        else [("猪副本", "猪副本"), ("今日小猪", "今日小猪")]
+    )
+    return card_message(
+        settings,
+        raid["leader_user"],
+        card,
+        "猪副本战报",
+        "raid",
+        buttons=buttons,
+        mention=raid["leader_user"] if status == "waiting" and settings.use_host("raid") else None,
+    )
 
 
 async def collection_message(
@@ -315,6 +545,14 @@ def guide_message(settings: Settings, user: dict, favorite: dict | None) -> Mess
         [
             "小猪商店 —— 每天 0 点上架 5 只小猪，每只限量 1 个，先到先得",
             f"商店交换 编号 {example} —— 用自己的 1 只小猪换走它",
+        ],
+        "【副本】",
+        [
+            "猪副本 —— 查看 3 个副本、9 个 boss 的专属机制",
+            f"开启副本 编号 {example} —— 发起组队；群友发送「加入副本 他的猪」加入",
+            f"满 {PARTY_SIZE} 人自动开打，{TIMEOUT_MINUTES} 分钟没满员自动取消，开打后不能中途加入",
+            "每关打赢：每位队员各得 1 只 boss 猪，全群各得 1 次再抽；倒下的猪，主人失去 1 只",
+            "打完一关由队长发送「继续副本」或「撤退副本」；每个副本每人每天 1 次",
         ],
     ]
     if favorite:

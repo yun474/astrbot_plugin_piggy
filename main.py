@@ -25,6 +25,7 @@ from .core.config import PiggyError, Settings, migrate_host_config
 from .core.database import Database
 from .core.delivery import Message, QQError, QQTransport, Sender, message_key
 from .core.diagnostics import exception_detail
+from .core.raid import dungeon
 from .core.rendering import clean_cards
 from .core.storage import ImagePublisher, UploadError
 from .core.views import (
@@ -36,6 +37,9 @@ from .core.views import (
     duel_ranking_message,
     duel_replay_message,
     guide_message,
+    raid_battle_message,
+    raid_list_message,
+    raid_lobby_message,
     ranking_message,
     request_message,
     requests_message,
@@ -73,11 +77,20 @@ BATTLE_COMMANDS = {
     "shop_exchange",
     "wild",
     "wild_challenge",
+    "raid",
+    "raid_open",
+    "raid_join",
+    "raid_leave",
+    "raid_continue",
+    "raid_retreat",
 }
 USAGE = {
     "duel": "用法：斗猪 @对方 你的小猪",
     "trade": "用法：小猪交换 @对方 你的小猪 对方的小猪",
 }
+RAID_USAGE = (
+    "用法：开启副本 编号 你的小猪，例如：开启副本 1 猪人（1 冰封猪圈 / 2 机械猪厂 / 3 猪神殿）"
+)
 NAME_USAGE = {
     "duel": "斗猪 #编号 你的小猪",
     "trade": "小猪交换 #编号 你的小猪 对方的小猪",
@@ -175,7 +188,7 @@ def mention_targets(event) -> tuple[list[dict], set[str]]:
     return targets, bots
 
 
-@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集与斗猪", "1.6.0")
+@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集与斗猪", "1.7.0")
 class PiggyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -507,6 +520,8 @@ class PiggyPlugin(Star):
                 level_max=settings.wild_level_max,
             )
             return await wild_battle_message(settings, self.root, result)
+        if command.startswith("raid"):
+            return await self._raid(app_id, group, user, command, words)
         if command == "shop":
             shop = await self.db.shop(app_id, group, user["id"])
             if settings.use_host("shop"):
@@ -574,6 +589,47 @@ class PiggyPlugin(Star):
             return await battle_message(settings, self.root, result)
         return trade_message(settings, result)
 
+    async def _raid(self, app_id: str, group: str, user: dict, command: str, words: tuple):
+        settings, uid = self.settings, user["id"]
+        if command == "raid":
+            status = await self.db.raid_status(app_id, group, uid)
+            return raid_list_message(settings, user, status)
+        if command == "raid_leave":
+            result = await self.db.leave_raid(app_id, group, uid)
+            return raid_lobby_message(
+                settings, result, "cancelled" if result["cancelled"] else "leave"
+            )
+        if command == "raid_retreat":
+            return raid_lobby_message(
+                settings, await self.db.retreat_raid(app_id, group, uid), "retreated"
+            )
+        if command in ("raid_join", "raid_continue") and settings.use_host("raid"):
+            settings.check_host()
+        if command == "raid_continue":
+            battle = await self.db.continue_raid(
+                app_id, group, uid, level_cap=settings.battle_level_cap
+            )
+            return await raid_battle_message(settings, self.root, battle)
+        if command == "raid_open":
+            try:
+                key = dungeon(words[0])["key"] if len(words) >= 2 else None
+            except KeyError:
+                key = None
+            if key is None:
+                raise PiggyError(RAID_USAGE)
+            pig = await self.db.find_pig(" ".join(words[1:]))
+            result = await self.db.open_raid(app_id, group, uid, key, pig["id"])
+            return raid_lobby_message(settings, result, "open")
+        if not words:
+            raise PiggyError("用法：加入副本 你的小猪，例如：加入副本 猪人")
+        pig = await self.db.find_pig(" ".join(words))
+        result = await self.db.join_raid(
+            app_id, group, uid, pig["id"], level_cap=settings.battle_level_cap
+        )
+        if result["started"]:
+            return await raid_battle_message(settings, self.root, result["battle"])
+        return raid_lobby_message(settings, result, "join")
+
     async def _failure(self, event, text: str):
         try:
             await self.transport.request(
@@ -637,6 +693,36 @@ class PiggyPlugin(Star):
     async def wild_challenge(self, event: AstrMessageEvent):
         """用自己的小猪挑战野猪，输了会失去出战的小猪。用法：挑战小猪 你的小猪"""
         await self._handle(event, "wild_challenge", command_words(event, ("挑战小猪",)))
+
+    @filter.command("猪副本")
+    async def raid(self, event: AstrMessageEvent):
+        """查看 3 个猪副本、9 个 boss 的机制和本群的组队情况。"""
+        await self._handle(event, "raid")
+
+    @filter.command("开启副本")
+    async def raid_open(self, event: AstrMessageEvent):
+        """发起猪副本组队，满 4 人自动开打。用法：开启副本 编号 你的小猪"""
+        await self._handle(event, "raid_open", command_words(event, ("开启副本",)))
+
+    @filter.command("加入副本")
+    async def raid_join(self, event: AstrMessageEvent):
+        """加入本群正在组队的猪副本。用法：加入副本 你的小猪"""
+        await self._handle(event, "raid_join", command_words(event, ("加入副本",)))
+
+    @filter.command("退出副本")
+    async def raid_leave(self, event: AstrMessageEvent):
+        """组队期间退出队伍；队长退出则整队取消。"""
+        await self._handle(event, "raid_leave")
+
+    @filter.command("继续副本")
+    async def raid_continue(self, event: AstrMessageEvent):
+        """队长：打完一关后继续挑战下一个 boss。"""
+        await self._handle(event, "raid_continue")
+
+    @filter.command("撤退副本")
+    async def raid_retreat(self, event: AstrMessageEvent):
+        """队长：打完一关后带着奖励撤退。"""
+        await self._handle(event, "raid_retreat")
 
     @filter.command("斗猪排行")
     async def duel_ranking(self, event: AstrMessageEvent):

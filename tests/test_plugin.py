@@ -449,6 +449,60 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.wild_challenge(OfficialEvent("w5", text="挑战小猪 坦克猪"))
         self.assertIn("已经被", sent.await_args.args[1]["content"])
 
+    async def test_raid_commands_from_lobby_to_retreat(self):
+        await self.plugin.initialize()
+        db = self.plugin.db
+        sent = self.plugin.transport.request
+
+        def last():
+            return sent.await_args.args[1]
+
+        players = ["lead", "m2", "m3", "m4"]
+        for player in players:
+            user = await db.identify("app", player, "group-a", player)
+            await db.run(
+                lambda c, user=user: c.execute(
+                    "INSERT INTO collections VALUES(?,'tank_pig',3,0,0)", (user["id"],)
+                )
+            )
+        await self.plugin.raid(OfficialEvent("r0", user="lead", text="猪副本"))
+        self.assertIn("被束缚的猪王", last()["content"])
+        await self.plugin.raid_open(OfficialEvent("r1", user="lead", text="开启副本 9 坦克猪"))
+        self.assertIn("用法：开启副本", last()["content"])
+        await self.plugin.raid_open(OfficialEvent("r2", user="lead", text="开启副本 2 坦克猪"))
+        self.assertIn("组队中 1/4", last()["content"])
+        for index, player in enumerate(players[1:3], 3):
+            await self.plugin.raid_join(
+                OfficialEvent(f"r{index}", user=player, text="加入副本 坦克猪")
+            )
+        self.assertIn("组队中 3/4", last()["content"])
+
+        def win(heroes, boss, slot_id, cfg, seed):
+            return {
+                "winner": 0,
+                "won": True,
+                "timeout": False,
+                "rounds": 3,
+                "log": ["R1 胜"],
+                "heroes": [
+                    {"seat": h.get("seat"), "hp": 5, "max_hp": 10, "alive": True} for h in heroes
+                ],
+                "boss": {"hp": 0, "max_hp": 99},
+                "field_events": [],
+            }
+
+        with patch("astrbot_plugin_piggy.core.database.simulate_raid", win):
+            await self.plugin.raid_join(OfficialEvent("r5", user="m4", text="加入副本 坦克猪"))
+        self.assertEqual(last()["msg_type"], 7)
+        lead = await db.identify("app", "lead", "group-a", "")
+        self.assertEqual(await db.bonus_count("app", "group-a", lead["id"]), 1)
+        await self.plugin.raid_continue(OfficialEvent("r6", user="m2", text="继续副本"))
+        self.assertIn("只有队长", last()["content"])
+        await self.plugin.raid_retreat(OfficialEvent("r7", user="lead", text="撤退副本"))
+        self.assertIn("撤退成功", last()["content"])
+        await self.plugin.raid_join(OfficialEvent("r8", user="m2", text="加入副本 坦克猪"))
+        self.assertIn("没有正在组队的副本", last()["content"])
+
     async def test_upload_failure_keeps_draw_and_next_command_displays_same_pig(self):
         from astrbot_plugin_piggy.core.storage import UploadError
 

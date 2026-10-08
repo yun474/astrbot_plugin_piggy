@@ -561,6 +561,170 @@ def render_duel_poster(root: Path, poster: dict) -> Card:
     return finish(canvas.image)
 
 
+def _hp_bar(canvas, x: int, y: int, width: int, hp, max_hp, color: str):
+    ratio = max(0, hp) / max_hp if max_hp else 0
+    canvas.draw.rounded_rectangle((x, y, x + width, y + 12), radius=6, fill=TRACK)
+    if ratio:
+        canvas.draw.rounded_rectangle(
+            (x, y, x + max(12, int(width * min(ratio, 1))), y + 12), radius=6, fill=color
+        )
+
+
+def _tag(canvas, text: str, x: int, y: int, fill: str, size: int = 20):
+    face = canvas.font(size, True)
+    width = canvas.draw.textlength(text, font=face)
+    canvas.draw.rounded_rectangle((x, y, x + width + 28, y + size + 18), radius=14, fill=fill)
+    canvas.draw.text((x + 14, y + 7), text, font=face, fill="#ffffff")
+
+
+def render_raid_poster(root: Path, poster: dict) -> Card:
+    """Raid report: the boss, the party row, events, every log line and the next step."""
+    log_size, log_step, width = 22, 34, 940
+    round_tag = re.compile(r"^(R\d+) ")
+    measure = Canvas(root, WIDTH, 1)
+    mechanics = [
+        (line, disabled, index == 0)
+        for name, text, disabled in poster["boss"]["mechanics"]
+        for index, line in enumerate(measure.wrap(f"{name}：{text}", 21, 880))
+    ]
+    events = [line for entry in poster["events"] for line in measure.wrap(entry, 22, 900)]
+    log = []
+    for entry in poster["log"]:
+        match = round_tag.match(entry)
+        tag = match.group(1) if match else ""
+        body = entry[match.end() :] if match else entry
+        for index, line in enumerate(measure.wrap(body, log_size, width - (58 if tag else 0))):
+            log.append((tag, line, index == 0, entry))
+    settlement = [line for entry in poster["settlement"] for line in measure.wrap(entry, 24, width)]
+    next_lines = measure.wrap(poster["next"], 26, 880)
+    measure.image.close()
+
+    boss_bottom = 590 + len(mechanics) * 32 + 20
+    party_top = boss_bottom + 30
+    party_bottom = party_top + 340
+    events_top = party_bottom + 30
+    events_bottom = events_top + (70 + len(events) * 34 if events else 0)
+    headline_top = events_bottom + (30 if events else 0)
+    log_top = headline_top + 110
+    settle_top = log_top + 70 + len(log) * log_step + 40
+    next_top = settle_top + 70 + len(settlement) * 38 + 30
+    height = next_top + 40 + len(next_lines) * 40 + 130
+    canvas = Canvas(root, WIDTH, height)
+    canvas.text("PIGGY  /  RAID", 58, 34, 18, ACCENT, True)
+    canvas.text(poster["title"], 54, 76, 56, bold=True, width=960)
+    canvas.text(poster["subtitle"], 58, 158, 24, SUB, width=960)
+
+    boss = poster["boss"]
+    defeated = boss["defeated"]
+    canvas.draw.rounded_rectangle((56, 223, 1024, boss_bottom + 3), radius=30, fill=BORDER)
+    canvas.draw.rounded_rectangle(
+        (56, 220, 1024, boss_bottom), radius=30, fill="#f1ebe4" if defeated else "#ffffff"
+    )
+    canvas.draw.rounded_rectangle((80, 244, 500, 554), radius=22, fill="#f9f4ed")
+    _paste_art(canvas, root, boss["asset"], (96, 256, 388, 286), faded=defeated)
+    canvas.text("BOSS", 540, 252, 20, ACCENT, True)
+    names = canvas.wrap(boss["name"], 36, 440)
+    if len(names) > 2:
+        names = [names[0], names[1][:-1] + "…"]
+    for row, line in enumerate(names):
+        canvas.text(line, 540, 286 + row * 48, 36, TEXT, True)
+    info = f"Lv{boss['level']}" + (f" · {boss['style']}" if boss.get("style") else "")
+    canvas.text(info, 540, 392, 24, SUB if defeated else ACCENT, True, width=440)
+    _hp_bar(canvas, 540, 446, 330, boss["hp"], boss["max_hp"], SUB if defeated else ACCENT)
+    canvas.text(f"{boss['hp']}/{boss['max_hp']}", 884, 438, 20, SUB, width=120)
+    _tag(canvas, "已击败" if defeated else "未击败", 540, 490, SUB if defeated else TEXT, 22)
+    canvas.text("BOSS 机制", 84, 570 - 4, 22, ACCENT, True)
+    for index, (line, disabled, first) in enumerate(mechanics):
+        y = 600 + index * 32 - 4
+        color = SUB if disabled else TEXT
+        canvas.text(
+            ("· " if first else "  ") + line + ("（本关失效）" if disabled and first else ""),
+            84,
+            y,
+            21,
+            color,
+            first,
+            width=920,
+        )
+
+    party = poster["party"]
+    count = max(1, len(party))
+    gap = 16
+    card_w = (968 - gap * (count - 1)) // count
+    for index, side in enumerate(party):
+        x = 56 + index * (card_w + gap)
+        state = side["state"]
+        dim = state in ("fallen", "absent")
+        canvas.draw.rounded_rectangle(
+            (x, party_top + 3, x + card_w, party_bottom + 3), radius=24, fill=BORDER
+        )
+        canvas.draw.rounded_rectangle(
+            (x, party_top, x + card_w, party_bottom),
+            radius=24,
+            fill="#f1ebe4" if dim else "#ffffff",
+        )
+        canvas.draw.rounded_rectangle(
+            (x + 12, party_top + 12, x + card_w - 12, party_top + 172), radius=18, fill="#f9f4ed"
+        )
+        _paste_art(
+            canvas, root, side["asset"], (x + 20, party_top + 18, card_w - 40, 148), faded=dim
+        )
+        label = {"fallen": "倒下", "absent": "缺席", "ally": "援军"}.get(state)
+        if label:
+            _tag(canvas, label, x + 16, party_top + 16, SUB if dim else ACCENT, 18)
+        inner = card_w - 32
+        canvas.text(side["owner"], x + 16, party_top + 186, 18, SUB, width=inner)
+        canvas.text(side["pig"], x + 16, party_top + 214, 24, TEXT, True, width=inner)
+        level = f"Lv{side['level']}" if side.get("level") else ""
+        info = " · ".join(part for part in (level, side.get("style") or "") if part)
+        canvas.text(info, x + 16, party_top + 252, 18, SUB if dim else ACCENT, True, width=inner)
+        if side.get("max_hp"):
+            _hp_bar(
+                canvas,
+                x + 16,
+                party_top + 288,
+                inner,
+                side["hp"],
+                side["max_hp"],
+                SUB if dim else ACCENT,
+            )
+            canvas.text(
+                f"{side['hp']}/{side['max_hp']}", x + 16, party_top + 304, 17, SUB, width=inner
+            )
+
+    if events:
+        canvas.draw.rounded_rectangle((56, events_top, 1024, events_bottom), radius=26, fill=PANEL)
+        canvas.text("随机事件", 84, events_top + 18, 26, bold=True)
+        for index, line in enumerate(events):
+            canvas.text(line, 84, events_top + 62 + index * 34, 22, TEXT, width=920)
+    canvas.draw.rounded_rectangle(
+        (56, headline_top, 1024, headline_top + 80), radius=26, fill=PANEL
+    )
+    canvas.text(poster["headline"], 86, headline_top + 18, 32, ACCENT, True, width=908)
+
+    canvas.text("战斗过程", 58, log_top, 28, bold=True)
+    for index, (tag, line, first, entry) in enumerate(log):
+        y = log_top + 60 + index * log_step
+        x = 70 + (58 if tag else 0)
+        if tag and first:
+            canvas.text(tag, 70, y, log_size, ACCENT, True)
+        bold = any(key in entry for key in ("倒下了", "站了起来", "【场地事件", "！"))
+        canvas.text(line, x, y, log_size, TEXT if tag else SUB, bold)
+    canvas.draw.line((56, settle_top, 1024, settle_top), fill=BORDER, width=2)
+    canvas.text("结算", 58, settle_top + 20, 28, bold=True)
+    for index, line in enumerate(settlement):
+        canvas.text(line, 70, settle_top + 76 + index * 38, 24, TEXT, width=950)
+    canvas.draw.rounded_rectangle(
+        (56, next_top, 1024, next_top + 30 + len(next_lines) * 40), radius=26, fill=ACCENT
+    )
+    for index, line in enumerate(next_lines):
+        canvas.text(line, 86, next_top + 14 + index * 40, 26, "#ffffff", True, width=908)
+    footer = height - 78
+    canvas.draw.line((56, footer, 1024, footer), fill=BORDER, width=2)
+    canvas.text(poster["footer"], 58, footer + 22, 20, ACCENT, width=966)
+    return finish(canvas.image)
+
+
 def render_duel_history(root: Path, name: str, history: dict) -> Card:
     """One row per duel with both pigs' art, the result and what changed hands."""
     records = history["records"]

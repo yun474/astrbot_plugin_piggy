@@ -369,7 +369,7 @@ class _Unit:
         self.label = data["label"]
         self.base = data["stats"]
         self.max_hp = data["stats"]["hp"]
-        self.hp = float(self.max_hp)
+        self.hp = float(data.get("start_hp", self.max_hp))
         self.buffs = []
         self.dots = []
         self.regens = []
@@ -513,7 +513,7 @@ class _Battle:
             dot["turns"] -= 1
             if dot["turns"] <= 0 and dot in unit.dots:
                 unit.dots.remove(dot)
-            damage = self.hurt(unit, unit.max_hp * dot["pct"] / 100)
+            damage = self.hurt(unit, self.dot_amount(unit, dot))
             self.say(f"{unit.label} 受到{dot['label']}影响，损失 {round(damage)} 生命")
             if not unit.alive:
                 return
@@ -530,13 +530,15 @@ class _Battle:
             unit.stun -= 1
             self.say(f"{unit.label} 处于{unit.stun_label}状态，这回合动不了")
         else:
-            skill = self.choose(unit, enemy)
-            self.cast(unit, enemy, skill)
+            self.act(unit, enemy)
         for group in (unit.buffs, unit.thorns):
             for item in list(group):
                 item["turns"] -= 1
                 if item["turns"] <= 0:
                     group.remove(item)
+
+    def act(self, unit: _Unit, enemy: _Unit):
+        self.cast(unit, enemy, self.choose(unit, enemy))
 
     def choose(self, unit: _Unit, enemy: _Unit) -> dict:
         basic = unit.actives[0]
@@ -583,11 +585,28 @@ class _Battle:
         self.say(
             f"{unit.label}「{skill['name']}」" + ("，".join(notes) if notes else "，但什么也没发生")
         )
-        if unit.alive and enemy.alive:
-            return
+        self.announce_falls(unit, enemy)
+
+    def announce_falls(self, unit: _Unit, enemy: _Unit):
         for target in (enemy, unit):
             if not target.alive:
                 self.say(f"{target.label} 倒下了")
+
+    def dot_amount(self, unit: _Unit, dot: dict) -> float:
+        return unit.max_hp * dot["pct"] / 100
+
+    def crit_roll(self, unit: _Unit, enemy: _Unit) -> bool:
+        return self.rng.random() * 100 < unit.stat("crit")
+
+    def pierce(self, unit: _Unit, enemy: _Unit, effect: dict) -> float:
+        return effect.get("pierce", 0)
+
+    def adjust_hit(self, unit: _Unit, enemy: _Unit, raw: float, effect: dict) -> float:
+        """Return 0 to void the hit entirely."""
+        return raw
+
+    def after_hit(self, unit: _Unit, enemy: _Unit, dealt: float):
+        pass
 
     def effect(self, unit: _Unit, enemy: _Unit, effect: dict, skill: dict) -> str:
         kind = effect["type"]
@@ -668,7 +687,8 @@ class _Battle:
         else:
             base = unit.stat(scale) * 1.6
         hits = effect.get("hits", 1)
-        total, crits, misses = 0.0, 0, 0
+        total, crits, misses, voids = 0.0, 0, 0, 0
+        self.void_note = ""
         for _ in range(hits):
             if not enemy.alive:
                 break
@@ -681,21 +701,28 @@ class _Battle:
             raw = base * power * self.rng.uniform(0.9, 1.1) * self.fury()
             if effect.get("execute") and enemy.ratio * 100 <= effect["execute"]:
                 raw *= EXECUTE_MULTIPLIER
-            if self.rng.random() * 100 < unit.stat("crit"):
+            if self.crit_roll(unit, enemy):
                 raw *= CRIT_MULTIPLIER
                 crits += 1
             if not true:
-                defense = enemy.stat("def") * (1 - effect.get("pierce", 0) / 100)
+                defense = enemy.stat("def") * (1 - min(100, self.pierce(unit, enemy, effect)) / 100)
                 raw *= 60 / (60 + defense)
+            raw = self.adjust_hit(unit, enemy, raw, effect)
+            if raw <= 0:
+                voids += 1
+                continue
             dealt = self.hurt(enemy, max(1.0, raw))
             total += dealt
+            self.after_hit(unit, enemy, dealt)
             for thorn in enemy.thorns:
                 self.hurt(unit, dealt * thorn["pct"] / 100)
         if misses == hits:
             return f"被{enemy.label}闪开了"
+        if misses + voids == hits:
+            return f"打了个空（{self.void_note or enemy.label + '化解了攻击'}）"
         text = f"造成 {round(total)} 伤害"
         if hits > 1:
-            text = f"{hits - misses} 段命中，共{text}"
+            text = f"{hits - misses - voids} 段命中，共{text}"
         if crits:
             text += "（暴击）"
         if effect.get("drain"):

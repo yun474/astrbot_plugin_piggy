@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import secrets
 import sqlite3
 import tempfile
@@ -11,6 +12,18 @@ from pathlib import Path
 
 from .battle import SKILL_SLOTS, entry_for, fighter, level_for, simulate
 from .config import PiggyError
+from .raid import (
+    DUNGEONS,
+    PARTY_SIZE,
+    REST_HEAL,
+    TIMEOUT_MINUTES,
+    boss_fighter,
+    boss_level,
+    dungeon,
+    mechanics_for,
+    simulate_raid,
+)
+from .raid_events import new_config, new_rewards, resolve, roll_entry, roll_interlude
 
 EAST_ASIA = timezone(timedelta(hours=8))
 # Safety valve only: with the default 50% chain chance this is never reached.
@@ -18,6 +31,7 @@ MAX_DRAW_ITEMS = 500
 _SYSTEM_RANDOM = secrets.SystemRandom()
 SHOP_SIZE = 5
 REQUEST_LABELS = {"duel": "斗猪", "trade": "交换"}
+RAID_ACTIVE = ("forming", "waiting")
 
 
 def player_name(user) -> str:
@@ -97,7 +111,7 @@ class Database:
             if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise PiggyError("数据库检查失败，已停止写入；请检查备份，数据库不会被自动清空。")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise PiggyError("数据库版本高于当前插件支持版本，请勿降级运行。")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""
@@ -197,6 +211,37 @@ class Database:
                     level INTEGER NOT NULL, won INTEGER NOT NULL, seed INTEGER NOT NULL,
                     log TEXT NOT NULL, summary TEXT NOT NULL, fought_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS raids (
+                    id INTEGER PRIMARY KEY, app_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                    day TEXT NOT NULL, dungeon INTEGER NOT NULL,
+                    leader INTEGER NOT NULL REFERENCES users(id),
+                    status TEXT NOT NULL DEFAULT 'forming' CHECK(status IN
+                        ('forming','waiting','cleared','retreated','failed','cancelled')),
+                    stage INTEGER NOT NULL DEFAULT 0, seed INTEGER NOT NULL,
+                    created_at REAL NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS raids_group ON raids(app_id, group_id, status);
+                CREATE INDEX IF NOT EXISTS raids_status ON raids(status, expires_at);
+                CREATE TABLE IF NOT EXISTS raid_members (
+                    raid_id INTEGER NOT NULL REFERENCES raids(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    pig_id TEXT NOT NULL REFERENCES pigs(id), seat INTEGER NOT NULL,
+                    hp REAL NOT NULL DEFAULT 1, alive INTEGER NOT NULL DEFAULT 1,
+                    mods TEXT NOT NULL DEFAULT '{}', joined_at REAL NOT NULL,
+                    PRIMARY KEY(raid_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS raid_members_user ON raid_members(user_id);
+                CREATE TABLE IF NOT EXISTS raid_entries (
+                    user_id INTEGER NOT NULL REFERENCES users(id), day TEXT NOT NULL,
+                    dungeon INTEGER NOT NULL, raid_id INTEGER NOT NULL REFERENCES raids(id),
+                    PRIMARY KEY(user_id, day, dungeon)
+                );
+                CREATE TABLE IF NOT EXISTS raid_battles (
+                    id INTEGER PRIMARY KEY, raid_id INTEGER NOT NULL REFERENCES raids(id),
+                    stage INTEGER NOT NULL, boss_pig TEXT NOT NULL, boss_level INTEGER NOT NULL,
+                    won INTEGER NOT NULL, seed INTEGER NOT NULL, events TEXT NOT NULL,
+                    log TEXT NOT NULL, summary TEXT NOT NULL, fought_at REAL NOT NULL
+                );
             """)
             columns = {row[1] for row in conn.execute("PRAGMA table_info(pigs)")}
             if "battle" not in columns:
@@ -207,7 +252,7 @@ class Database:
                 conn.execute(
                     "ALTER TABLE battle_records ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
                 )
-            conn.execute("PRAGMA user_version=2")
+            conn.execute("PRAGMA user_version=3")
             conn.execute("COMMIT")
 
         try:
@@ -644,6 +689,589 @@ class Database:
             }
 
         return await self.run(challenge)
+
+    @staticmethod
+    def _raid_expire(conn, app_id: str, group_id: str, stamp: float) -> list[dict]:
+        """Lobbies that never filled are cancelled; undecided parties retreat."""
+        rows = conn.execute(
+            "SELECT * FROM raids WHERE status IN ('forming','waiting') AND expires_at<=?",
+            (stamp,),
+        ).fetchall()
+        expired = []
+        for row in rows:
+            status = "cancelled" if row["status"] == "forming" else "retreated"
+            conn.execute(
+                "UPDATE raids SET status=?,updated_at=? WHERE id=?", (status, stamp, row["id"])
+            )
+            if row["app_id"] == app_id and row["group_id"] == group_id:
+                expired.append({**dict(row), "status": status, "dungeon": dungeon(row["dungeon"])})
+        return expired
+
+    async def _raid_sweep(self, app_id: str, group_id: str, stamp: float) -> list[dict]:
+        """Commit timeouts on their own, so a rejected command cannot roll them back."""
+
+        def sweep(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            return self._raid_expire(conn, app_id, group_id, stamp)
+
+        return await self.run(sweep)
+
+    @staticmethod
+    def _raid_view(conn, row) -> dict:
+        raid = dict(row)
+        raid["dungeon"] = dungeon(row["dungeon"])
+        raid["leader_user"] = dict(
+            conn.execute("SELECT * FROM users WHERE id=?", (row["leader"],)).fetchone()
+        )
+        members = []
+        for member in conn.execute(
+            "SELECT * FROM raid_members WHERE raid_id=? ORDER BY seat", (row["id"],)
+        ):
+            pig = dict(
+                conn.execute("SELECT * FROM pigs WHERE id=?", (member["pig_id"],)).fetchone()
+            )
+            pig.pop("battle", None)
+            members.append(
+                {
+                    **dict(member),
+                    "mods": json.loads(member["mods"]),
+                    "user": dict(
+                        conn.execute(
+                            "SELECT * FROM users WHERE id=?", (member["user_id"],)
+                        ).fetchone()
+                    ),
+                    "pig": pig,
+                }
+            )
+        raid["members"] = members
+        return raid
+
+    @staticmethod
+    def _boss_names(conn) -> dict:
+        """Boss slot id -> display name; a missing boss pig is shown as possessed."""
+        names = {
+            row["id"]: row["name"]
+            for row in conn.execute("SELECT id,name FROM pigs WHERE enabled=1")
+        }
+        return {
+            slot: names.get(slot, "被附身的神秘小猪")
+            for item in DUNGEONS
+            for slot in item["bosses"]
+        }
+
+    @staticmethod
+    def _group_raid(conn, app_id: str, group_id: str):
+        return conn.execute(
+            "SELECT * FROM raids WHERE app_id=? AND group_id=? AND status IN ('forming','waiting') "
+            "ORDER BY id DESC LIMIT 1",
+            (app_id, group_id),
+        ).fetchone()
+
+    @staticmethod
+    def _raid_check_member(conn, user_id: int, dungeon_key: int, day: str, pig_id: str):
+        busy = conn.execute(
+            "SELECT r.* FROM raid_members m JOIN raids r ON r.id=m.raid_id "
+            "WHERE m.user_id=? AND r.status IN ('forming','waiting')",
+            (user_id,),
+        ).fetchone()
+        if busy:
+            raise PiggyError(
+                f"你已经在「{dungeon(busy['dungeon'])['name']}」的队伍里了，"
+                "同一时间只能参加一支队伍。"
+            )
+        if conn.execute(
+            "SELECT 1 FROM raid_entries WHERE user_id=? AND day=? AND dungeon=?",
+            (user_id, day, dungeon_key),
+        ).fetchone():
+            raise PiggyError(
+                f"你今天已经打过「{dungeon(dungeon_key)['name']}」了，每个副本每人每天 1 次，"
+                "可以换一个副本。"
+            )
+        if _owned(conn, user_id, pig_id) < 1:
+            raise PiggyError("你的猪圈里没有这只小猪，换一只出战吧。")
+
+    async def raid_status(
+        self, app_id: str, group_id: str, user_id: int, now: datetime | None = None
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        day = now.astimezone(EAST_ASIA).date().isoformat()
+
+        def read(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            expired = self._raid_expire(conn, app_id, group_id, now.timestamp())
+            row = self._group_raid(conn, app_id, group_id)
+            done = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT dungeon FROM raid_entries WHERE user_id=? AND day=?", (user_id, day)
+                )
+            }
+            return {
+                "raid": self._raid_view(conn, row) if row else None,
+                "expired": expired,
+                "done": done,
+                "day": day,
+                "now": now.timestamp(),
+                "bosses": self._boss_names(conn),
+            }
+
+        return await self.run(read)
+
+    async def open_raid(
+        self,
+        app_id: str,
+        group_id: str,
+        user_id: int,
+        dungeon_key: int,
+        pig_id: str,
+        now: datetime | None = None,
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        day = now.astimezone(EAST_ASIA).date().isoformat()
+        stamp = now.timestamp()
+
+        expired = await self._raid_sweep(app_id, group_id, stamp)
+
+        def create(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            self._raid_expire(conn, app_id, group_id, stamp)
+            active = self._group_raid(conn, app_id, group_id)
+            if active:
+                name = dungeon(active["dungeon"])["name"]
+                if active["status"] == "forming":
+                    raise PiggyError(
+                        f"本群已经有一支「{name}」队伍在组队，发送「加入副本 你的小猪」加入吧。"
+                    )
+                raise PiggyError(f"本群的「{name}」队伍还在副本里，等他们结束后再开新的副本。")
+            self._raid_check_member(conn, user_id, dungeon_key, day, pig_id)
+            cursor = conn.execute(
+                "INSERT INTO raids(app_id,group_id,day,dungeon,leader,seed,created_at,expires_at,"
+                "updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    app_id,
+                    group_id,
+                    day,
+                    dungeon_key,
+                    user_id,
+                    secrets.randbits(32),
+                    stamp,
+                    stamp + TIMEOUT_MINUTES * 60,
+                    stamp,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO raid_members(raid_id,user_id,pig_id,seat,joined_at) VALUES(?,?,?,0,?)",
+                (cursor.lastrowid, user_id, pig_id, stamp),
+            )
+            row = conn.execute("SELECT * FROM raids WHERE id=?", (cursor.lastrowid,)).fetchone()
+            return {"raid": self._raid_view(conn, row), "expired": expired, "now": stamp}
+
+        return await self.run(create)
+
+    async def join_raid(
+        self,
+        app_id: str,
+        group_id: str,
+        user_id: int,
+        pig_id: str,
+        *,
+        level_cap: int = 20,
+        now: datetime | None = None,
+        seed: int | None = None,
+    ) -> dict:
+        """Join the group's lobby; the fourth member starts the first boss right away."""
+        now = now or datetime.now(timezone.utc)
+        day = now.astimezone(EAST_ASIA).date().isoformat()
+        stamp = now.timestamp()
+
+        expired = await self._raid_sweep(app_id, group_id, stamp)
+
+        def join(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            self._raid_expire(conn, app_id, group_id, stamp)
+            raid = self._group_raid(conn, app_id, group_id)
+            if not raid:
+                note = "上一支队伍 10 分钟内没凑满 4 人，已自动取消。" if expired else ""
+                raise PiggyError(
+                    f"{note}本群现在没有正在组队的副本，发送「开启副本 编号 你的小猪」发起一个吧。"
+                )
+            if raid["status"] != "forming":
+                raise PiggyError("队伍已经出发了，副本开打后不能中途加入。")
+            if conn.execute(
+                "SELECT 1 FROM raid_members WHERE raid_id=? AND user_id=?", (raid["id"], user_id)
+            ).fetchone():
+                raise PiggyError("你已经在这支队伍里了，等其他人加入吧。")
+            self._raid_check_member(conn, user_id, raid["dungeon"], day, pig_id)
+            count = conn.execute(
+                "SELECT count(*) FROM raid_members WHERE raid_id=?", (raid["id"],)
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO raid_members(raid_id,user_id,pig_id,seat,joined_at) VALUES(?,?,?,?,?)",
+                (raid["id"], user_id, pig_id, count, stamp),
+            )
+            if count + 1 < PARTY_SIZE:
+                row = conn.execute("SELECT * FROM raids WHERE id=?", (raid["id"],)).fetchone()
+                return {
+                    "raid": self._raid_view(conn, row),
+                    "started": False,
+                    "expired": expired,
+                    "now": stamp,
+                }
+            for (member,) in conn.execute(
+                "SELECT user_id FROM raid_members WHERE raid_id=?", (raid["id"],)
+            ).fetchall():
+                conn.execute(
+                    "INSERT INTO raid_entries VALUES(?,?,?,?)",
+                    (member, day, raid["dungeon"], raid["id"]),
+                )
+            battle = self._raid_fight(conn, raid["id"], day, stamp, level_cap, seed, False)
+            return {"raid": battle["raid"], "started": True, "battle": battle, "expired": expired}
+
+        return await self.run(join)
+
+    async def leave_raid(
+        self, app_id: str, group_id: str, user_id: int, now: datetime | None = None
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        stamp = now.timestamp()
+
+        await self._raid_sweep(app_id, group_id, stamp)
+
+        def leave(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            self._raid_expire(conn, app_id, group_id, stamp)
+            raid = self._group_raid(conn, app_id, group_id)
+            if (
+                not raid
+                or not conn.execute(
+                    "SELECT 1 FROM raid_members WHERE raid_id=? AND user_id=?",
+                    (raid["id"], user_id),
+                ).fetchone()
+            ):
+                raise PiggyError("你不在本群正在组队的队伍里。")
+            if raid["status"] != "forming":
+                raise PiggyError("队伍已经出发，不能退出；队长可以发送「撤退副本」结束副本。")
+            if raid["leader"] == user_id:
+                conn.execute(
+                    "UPDATE raids SET status='cancelled',updated_at=? WHERE id=?",
+                    (stamp, raid["id"]),
+                )
+                cancelled = True
+            else:
+                conn.execute(
+                    "DELETE FROM raid_members WHERE raid_id=? AND user_id=?", (raid["id"], user_id)
+                )
+                for seat, (member,) in enumerate(
+                    conn.execute(
+                        "SELECT user_id FROM raid_members WHERE raid_id=? ORDER BY joined_at,seat",
+                        (raid["id"],),
+                    ).fetchall()
+                ):
+                    conn.execute(
+                        "UPDATE raid_members SET seat=? WHERE raid_id=? AND user_id=?",
+                        (seat, raid["id"], member),
+                    )
+                cancelled = False
+            row = conn.execute("SELECT * FROM raids WHERE id=?", (raid["id"],)).fetchone()
+            return {"raid": self._raid_view(conn, row), "cancelled": cancelled, "now": stamp}
+
+        return await self.run(leave)
+
+    def _raid_leader_waiting(self, conn, app_id, group_id, user_id, stamp, expired):
+        self._raid_expire(conn, app_id, group_id, stamp)
+        raid = self._group_raid(conn, app_id, group_id)
+        if not raid:
+            if any(e["status"] == "retreated" for e in expired):
+                raise PiggyError("队长 10 分钟内没有决定，队伍已经自动撤退，已得到的奖励都保留着。")
+            raise PiggyError("本群现在没有进行中的副本。")
+        if raid["status"] != "waiting":
+            raise PiggyError("队伍还在组队，满 4 人会自动出发。")
+        if raid["leader"] != user_id:
+            leader = conn.execute("SELECT * FROM users WHERE id=?", (raid["leader"],)).fetchone()
+            raise PiggyError(f"只有队长 {player_name(leader)} 能决定继续还是撤退。")
+        return raid
+
+    async def continue_raid(
+        self,
+        app_id: str,
+        group_id: str,
+        user_id: int,
+        *,
+        level_cap: int = 20,
+        now: datetime | None = None,
+        seed: int | None = None,
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        day = now.astimezone(EAST_ASIA).date().isoformat()
+        stamp = now.timestamp()
+
+        expired = await self._raid_sweep(app_id, group_id, stamp)
+
+        def advance(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            raid = self._raid_leader_waiting(conn, app_id, group_id, user_id, stamp, expired)
+            return self._raid_fight(conn, raid["id"], day, stamp, level_cap, seed, True)
+
+        return await self.run(advance)
+
+    async def retreat_raid(
+        self, app_id: str, group_id: str, user_id: int, now: datetime | None = None
+    ) -> dict:
+        now = now or datetime.now(timezone.utc)
+        stamp = now.timestamp()
+
+        expired = await self._raid_sweep(app_id, group_id, stamp)
+
+        def retreat(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            raid = self._raid_leader_waiting(conn, app_id, group_id, user_id, stamp, expired)
+            conn.execute(
+                "UPDATE raids SET status='retreated',updated_at=? WHERE id=?", (stamp, raid["id"])
+            )
+            row = conn.execute("SELECT * FROM raids WHERE id=?", (raid["id"],)).fetchone()
+            return {"raid": self._raid_view(conn, row)}
+
+        return await self.run(retreat)
+
+    def _raid_fight(
+        self, conn, raid_id: int, day: str, stamp: float, level_cap: int, seed, interlude: bool
+    ) -> dict:
+        """Fight the next boss inside the caller's transaction and settle every member."""
+        raid = conn.execute("SELECT * FROM raids WHERE id=?", (raid_id,)).fetchone()
+        info = dungeon(raid["dungeon"])
+        stage = raid["stage"] + 1
+        fight_seed = (raid["seed"] + stage * 7919) & 0xFFFFFFFF if seed is None else seed
+        rng = random.Random(fight_seed ^ 0x5EED)
+        enabled = [dict(r) for r in conn.execute("SELECT * FROM pigs WHERE enabled=1 ORDER BY id")]
+        if not enabled:
+            raise PiggyError("猪库没有启用的小猪，副本暂时无法进行。")
+        members = self._raid_view(conn, raid)["members"]
+        party, absent = [], []
+        for member in members:
+            if not member["alive"]:
+                continue
+            count = _owned(conn, member["user_id"], member["pig_id"])
+            if count < 1:
+                absent.append(member)
+                continue
+            pig = dict(
+                conn.execute("SELECT * FROM pigs WHERE id=?", (member["pig_id"],)).fetchone()
+            )
+            party.append(
+                {
+                    "seat": member["seat"],
+                    "label": f"{player_name(member['user'])}的{pig['name']}",
+                    "hp": member["hp"],
+                    "mods": dict(member["mods"]),
+                    "member": member,
+                    "pig": pig,
+                    "count": count,
+                }
+            )
+        slot_id = info["bosses"][stage - 1]
+        mechanics = mechanics_for(slot_id).MECHANICS
+        cfg, rewards, events = new_config(), new_rewards(), []
+        if interlude:
+            for member in party:
+                member["hp"] = min(1.0, member["hp"] + REST_HEAL)
+            for event in resolve([roll_interlude(rng)], party, rng, cfg, rewards, mechanics):
+                events.append({**event, "kind": "关间"})
+        for event in resolve(roll_entry(rng, info["key"]), party, rng, cfg, rewards, mechanics):
+            events.append({**event, "kind": "进场"})
+        boss_row = conn.execute(
+            "SELECT * FROM pigs WHERE id=? AND enabled=1", (slot_id,)
+        ).fetchone()
+        possessed = boss_row is None
+        boss_pig = dict(boss_row) if boss_row else dict(rng.choice(enabled))
+        levels = [level_for(member["count"], level_cap) for member in party]
+        level = boss_level(levels)
+        boss = boss_fighter(
+            boss_pig,
+            entry_for(boss_pig["battle"]),
+            level,
+            stage,
+            slot_id,
+            ("被附身的" if possessed else "") + boss_pig["name"],
+        )
+        heroes = []
+        for member, hero_level in zip(party, levels):
+            hero = fighter(
+                member["pig"], entry_for(member["pig"]["battle"]), hero_level, member["label"]
+            )
+            hero.update(
+                seat=member["seat"],
+                start_hp=max(1, round(hero["stats"]["hp"] * member["hp"])),
+                mods=member["mods"],
+            )
+            heroes.append(hero)
+        ally = None
+        if cfg.get("ally") and party:
+            ally_pig = rng.choice(enabled)
+            ally = fighter(
+                ally_pig,
+                entry_for(ally_pig["battle"]),
+                max(1, round(sum(levels) / len(levels))),
+                f"援军·{ally_pig['name']}",
+            )
+            heroes.append(ally)
+        result = None
+        if party:
+            result = simulate_raid(heroes, boss, slot_id, cfg, fight_seed)
+        won = bool(result and result["won"])
+        outcome = {h["seat"]: h for h in (result["heroes"] if result else [])}
+        changes = {member["user_id"]: [] for member in members}
+        fighters = []
+        for member, hero, hero_level in zip(party, heroes, levels):
+            state = outcome[member["seat"]]
+            user_id, pig = member["member"]["user_id"], member["pig"]
+            if state["alive"]:
+                conn.execute(
+                    "UPDATE raid_members SET hp=?,mods=? WHERE raid_id=? AND user_id=?",
+                    (
+                        state["hp"] / state["max_hp"],
+                        json.dumps(member["mods"]),
+                        raid_id,
+                        user_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE raid_members SET hp=0,alive=0 WHERE raid_id=? AND user_id=?",
+                    (raid_id, user_id),
+                )
+                before = _owned(conn, user_id, pig["id"])
+                _take(conn, user_id, pig["id"])
+                changes[user_id].append(_level_change(pig, before, before - 1, level_cap))
+            fighters.append(
+                {
+                    "seat": member["seat"],
+                    "user": member["member"]["user"],
+                    "pig": {k: v for k, v in pig.items() if k != "battle"},
+                    "level": hero_level,
+                    "style": hero["style"],
+                    "hp": state["hp"],
+                    "max_hp": state["max_hp"],
+                    "alive": state["alive"],
+                }
+            )
+        copies = 2 if rewards["mimic"] else 1
+        prize = {k: v for k, v in boss_pig.items()}
+        if won:
+            for member in members:
+                before = _owned(conn, member["user_id"], prize["id"])
+                for _ in range(copies):
+                    _give(conn, member["user_id"], prize["id"], stamp)
+                changes[member["user_id"]].append(
+                    _level_change(prize, before, before + copies, level_cap)
+                )
+        for _ in range(rewards["chest"]):
+            for member in members:
+                found = rng.choice(enabled)
+                before = _owned(conn, member["user_id"], found["id"])
+                _give(conn, member["user_id"], found["id"], stamp)
+                changes[member["user_id"]].append(
+                    _level_change(found, before, before + 1, level_cap)
+                )
+        bonus = int(won) + rewards["clover"]
+        rewarded = 0
+        if bonus:
+            players = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT user_id FROM group_players WHERE app_id=? AND group_id=?",
+                    (raid["app_id"], raid["group_id"]),
+                )
+            ]
+            conn.executemany(
+                """
+                INSERT INTO draw_bonus VALUES(?,?,?,?,?) ON CONFLICT(app_id,group_id,user_id,day)
+                DO UPDATE SET count=count+excluded.count
+                """,
+                [(raid["app_id"], raid["group_id"], player, day, bonus) for player in players],
+            )
+            rewarded = len(players)
+        survivors = any(f["alive"] for f in fighters)
+        if won and stage < len(info["bosses"]) and survivors:
+            status = "waiting"
+        elif won and stage == len(info["bosses"]):
+            status = "cleared"
+        else:
+            status = "failed"
+        conn.execute(
+            "UPDATE raids SET status=?,stage=?,expires_at=?,updated_at=? WHERE id=?",
+            (status, stage, stamp + TIMEOUT_MINUTES * 60, stamp, raid_id),
+        )
+        summary = {
+            "rounds": result["rounds"] if result else 0,
+            "boss": result["boss"] if result else None,
+            "heroes": result["heroes"] if result else [],
+            "timeout": bool(result and result["timeout"]),
+        }
+        cursor = conn.execute(
+            "INSERT INTO raid_battles(raid_id,stage,boss_pig,boss_level,won,seed,events,log,"
+            "summary,fought_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                raid_id,
+                stage,
+                boss_pig["id"],
+                level,
+                int(won),
+                fight_seed,
+                json.dumps(events, ensure_ascii=False),
+                json.dumps(result["log"] if result else [], ensure_ascii=False),
+                json.dumps(summary),
+                stamp,
+            ),
+        )
+        prize.pop("battle", None)
+        view = self._raid_view(
+            conn, conn.execute("SELECT * FROM raids WHERE id=?", (raid_id,)).fetchone()
+        )
+        return {
+            "id": cursor.lastrowid,
+            "raid": view,
+            "day": day,
+            "stage": stage,
+            "status": status,
+            "won": won,
+            "boss": {
+                "pig": prize,
+                "label": boss["label"],
+                "level": level,
+                "style": boss["style"],
+                "hp": result["boss"]["hp"] if result else boss["stats"]["hp"],
+                "max_hp": result["boss"]["max_hp"] if result else boss["stats"]["hp"],
+                "mechanics": mechanics,
+                "disabled": cfg.get("disabled"),
+                "possessed": possessed,
+            },
+            "fighters": fighters,
+            "ally": (
+                {
+                    "pig": {"name": ally["name"], "asset": ally["asset"]},
+                    "label": ally["label"],
+                    "level": ally["level"],
+                    "style": ally["style"],
+                    "hp": result["heroes"][-1]["hp"],
+                    "max_hp": result["heroes"][-1]["max_hp"],
+                    "alive": result["heroes"][-1]["alive"],
+                }
+                if ally and result
+                else None
+            ),
+            "absent": absent,
+            "retired": [m for m in members if not m["alive"]],
+            "events": events,
+            "result": result,
+            "changes": [(member["user"], changes[member["user_id"]]) for member in members],
+            "copies": copies if won else 0,
+            "chest": rewards["chest"],
+            "bonus": bonus,
+            "rewarded": rewarded,
+            "next_boss": (
+                self._boss_names(conn)[info["bosses"][stage]] if status == "waiting" else ""
+            ),
+        }
 
     async def collection(self, user_id: int) -> dict:
         def read(conn):
