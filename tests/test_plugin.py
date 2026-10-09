@@ -77,6 +77,9 @@ class NativeEvent:
     def get_platform_id(self):
         return "aiocqhttp"
 
+    def get_platform_name(self):
+        return "aiocqhttp"
+
     def stop_event(self):
         pass
 
@@ -397,6 +400,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         event.send.assert_not_awaited()
         self.plugin.transport.request.assert_not_awaited()
         self.plugin.transport.upload_image.assert_not_awaited()
+        self.assertTrue(self.plugin.avatars.get_many.await_args.kwargs["qq_number"])
         user = await self.plugin.db.identify("aiocqhttp", "10001", "20001", "")
         self.assertEqual(user["nickname"], "群友")
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)

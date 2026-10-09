@@ -247,6 +247,11 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(avatars.session.get.call_count, 1)
         await avatars.get("other-app", "member")
         self.assertEqual(avatars.session.get.call_count, 2)
+        self.assertIn("/qqapp/other-app/member/", avatars.session.get.call_args.args[0])
+        await avatars.get("aiocqhttp", "10001", qq_number=True)
+        self.assertEqual(
+            avatars.session.get.call_args.args[0], "https://q1.qlogo.cn/g?b=qq&nk=10001&s=100"
+        )
         for i in range(256):
             await avatars.get("app", str(i))
         self.assertEqual(len(avatars.cache), 256)

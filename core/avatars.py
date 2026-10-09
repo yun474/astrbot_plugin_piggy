@@ -1,4 +1,4 @@
-"""Bounded, in-memory QQ avatar cache. No third-party profile lookup."""
+"""Bounded, in-memory QQ avatar cache for official openids and OneBot QQ numbers."""
 
 import asyncio
 import io
@@ -16,12 +16,14 @@ class Avatars:
         self.session = None
         self.limit = asyncio.Semaphore(4)
 
-    async def get_many(self, app_id: str, players: list[dict]) -> dict[str, bytes]:
+    async def get_many(
+        self, app_id: str, players: list[dict], *, qq_number: bool = False
+    ) -> dict[str, bytes]:
         ids = list(dict.fromkeys(p["open_id"] for p in players))
-        values = await asyncio.gather(*(self.get(app_id, open_id) for open_id in ids))
+        values = await asyncio.gather(*(self.get(app_id, i, qq_number=qq_number) for i in ids))
         return {key: value for key, value in zip(ids, values) if value}
 
-    async def get(self, app_id: str, open_id: str) -> bytes | None:
+    async def get(self, app_id: str, open_id: str, *, qq_number: bool = False) -> bytes | None:
         key = app_id, open_id
         async with self.limit:
             cached = self.cache.get(key)
@@ -30,7 +32,13 @@ class Avatars:
                 return cached[1]
             if self.session is None:
                 self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
-            url = f"https://q.qlogo.cn/qqapp/{quote(app_id, safe='')}/{quote(open_id, safe='')}/100"
+            if qq_number:
+                url = f"https://q1.qlogo.cn/g?b=qq&nk={quote(open_id, safe='')}&s=100"
+            else:
+                url = (
+                    f"https://q.qlogo.cn/qqapp/{quote(app_id, safe='')}/"
+                    f"{quote(open_id, safe='')}/100"
+                )
             data = None
             try:
                 async with self.session.get(url, allow_redirects=False) as response:

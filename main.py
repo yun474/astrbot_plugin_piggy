@@ -28,7 +28,7 @@ MAX_INFLIGHT = 12
 REQUEST_TIMEOUT = 240
 
 
-@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集", "1.1.3")
+@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集", "1.1.4")
 class PiggyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -210,7 +210,15 @@ class PiggyPlugin(Star):
                 if kind not in {"种类", "数量"}:
                     raise PiggyError("用法：小猪排行 种类/数量")
                 boards = await self.db.rankings(app_id, event.get_group_id())
-                avatars = await self.avatars.get_many(app_id, boards["species"] + boards["total"])
+                # OneBot sender ids are QQ numbers; other platforms have no QQ avatar to fetch.
+                onebot = not official and event.get_platform_name() == "aiocqhttp"
+                avatars = (
+                    await self.avatars.get_many(
+                        app_id, boards["species"] + boards["total"], qq_number=onebot
+                    )
+                    if official or onebot
+                    else {}
+                )
                 message = await asyncio.to_thread(
                     ranking_message, settings, self.root, user, boards, avatars
                 )
