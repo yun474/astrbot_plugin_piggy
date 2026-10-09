@@ -2,10 +2,12 @@ import asyncio
 import contextlib
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
     QQOfficialMessageEvent,
@@ -26,7 +28,7 @@ MAX_INFLIGHT = 12
 REQUEST_TIMEOUT = 240
 
 
-@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集", "1.1.2")
+@register("astrbot_plugin_piggy", "yun474", "QQ 官方机器人每日小猪收集", "1.1.3")
 class PiggyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -94,20 +96,21 @@ class PiggyPlugin(Star):
             await asyncio.sleep(3600)
 
     async def _handle(self, event: AstrMessageEvent, command: str, args: tuple = ()):
-        if (
-            not isinstance(event, QQOfficialMessageEvent)
-            or not isinstance(event.message_obj.raw_message, GroupMessage)
-            or not event.get_group_id()
+        official = isinstance(event, QQOfficialMessageEvent)
+        if not event.get_group_id() or (
+            official and not isinstance(event.message_obj.raw_message, GroupMessage)
         ):
-            await event.send(event.plain_result("今日小猪收集版目前支持 QQ 官方机器人群聊。"))
+            await event.send(event.plain_result("今日小猪收集版请在群聊中使用。"))
             return
         event.stop_event()
         if self.stopping:
             return
-        token = event.bot.api._http._token
-        app_id = str(token.app_id or "")
+        # Non-official platforms keep separate accounts per AstrBot platform instance.
+        app_id = (
+            str(event.bot.api._http._token.app_id or "") if official else event.get_platform_id()
+        )
         if not app_id or not event.message_obj.message_id:
-            await event.send(event.plain_result("未取得官方消息标识，暂时无法处理收藏。"))
+            await event.send(event.plain_result("未取得消息标识，暂时无法处理收藏。"))
             return
         key = message_key(event, app_id)
         if key in self.inflight:
@@ -153,12 +156,22 @@ class PiggyPlugin(Star):
             if time.monotonic() >= deadline:
                 raise PiggyError("本次请求排队超时，请重新发送指令。")
             await self.initialize()
-            receipt = await self.db.delivery(message_key(event, app_id))
+            key = message_key(event, app_id)
+            receipt = await self.db.delivery(key)
             if receipt["done"]:
                 return
-            raw = event.message_obj.raw_message
-            nickname = getattr(getattr(raw, "author", None), "username", "") or ""
-            if not nickname:
+            official = isinstance(event, QQOfficialMessageEvent)
+            # Markdown, keyboards and image hosts are QQ official features; others get cards.
+            settings = (
+                self.settings
+                if official
+                else replace(
+                    self.settings, display=dict.fromkeys(("draw", "atlas", "pen", "ranking"), False)
+                )
+            )
+            nickname = event.get_sender_name() or ""
+            if not nickname and official:
+                raw = event.message_obj.raw_message
                 nickname = (getattr(raw, "raw_data", {}) or {}).get("author", {}).get(
                     "username", ""
                 ) or ""
@@ -166,8 +179,8 @@ class PiggyPlugin(Star):
                 app_id, event.get_sender_id(), event.get_group_id(), nickname
             )
             if command == "draw":
-                if self.settings.use_host(command):
-                    self.settings.check_host()
+                if settings.use_host(command):
+                    settings.check_host()
                 result = await self.db.draw(
                     user["id"],
                     event.get_group_id(),
@@ -177,7 +190,7 @@ class PiggyPlugin(Star):
                 )
                 message = await asyncio.to_thread(
                     today_message,
-                    self.settings,
+                    settings,
                     self.root,
                     user,
                     result,
@@ -185,7 +198,7 @@ class PiggyPlugin(Star):
                 )
             elif command in {"atlas", "pen"}:
                 message = await collection_message(
-                    self.settings,
+                    settings,
                     self.root,
                     user,
                     await self.db.collection(user["id"]),
@@ -199,7 +212,7 @@ class PiggyPlugin(Star):
                 boards = await self.db.rankings(app_id, event.get_group_id())
                 avatars = await self.avatars.get_many(app_id, boards["species"] + boards["total"])
                 message = await asyncio.to_thread(
-                    ranking_message, self.settings, self.root, user, boards, avatars
+                    ranking_message, settings, self.root, user, boards, avatars
                 )
             elif command == "alias":
                 await self.db.set_alias(user["id"], args[0])
@@ -216,6 +229,8 @@ class PiggyPlugin(Star):
                     await self.db.backup(self.settings.backup_keep)
                 message = Message("备份已保存到插件数据目录 backups，包含数据库、猪库及历史素材。")
             else:
+                if not official:
+                    raise PiggyError("小猪诊断仅用于检查 QQ 官方机器人的图片转存链路。")
                 self.settings.check_host()
                 progress = await self.db.collection(user["id"])
                 pig = next(p for p in progress["entries"] if p["enabled"])
@@ -223,9 +238,15 @@ class PiggyPlugin(Star):
                     "# 图片链路检查\n\n![诊断小猪 #192px #192px]({{image:0}})\n\nQQ 图片转存检查已通过。",
                     (self.root / "assets" / pig["asset"],),
                 )
-            await self.sender.send(
-                event, app_id, message, deadline, force_upload=command == "diagnose"
-            )
+            if official:
+                await self.sender.send(
+                    event, app_id, message, deadline, force_upload=command == "diagnose"
+                )
+            else:
+                chain = [Plain(message.text)] if message.text else []
+                chain += [Image.fromBytes(image) for image in message.images]
+                await event.send(event.chain_result(chain))
+                await self.db.delivery_update(key, receipt["sequence"], True)
         except PiggyError as exc:
             if isinstance(exc, UploadError):
                 logger.warning(
@@ -256,6 +277,9 @@ class PiggyPlugin(Star):
 
     async def _failure(self, event, text: str):
         try:
+            if not isinstance(event, QQOfficialMessageEvent):
+                await event.send(event.plain_result(text))
+                return
             await self.transport.request(
                 event,
                 {

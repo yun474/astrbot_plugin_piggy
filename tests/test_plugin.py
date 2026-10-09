@@ -50,6 +50,42 @@ class OfficialEvent:
     def plain_result(self, text):
         return text
 
+    def chain_result(self, chain):
+        return chain
+
+    def get_sender_name(self):
+        return self.message_obj.raw_message.author.username
+
+
+class NativeEvent:
+    """A non-official AstrBot event, e.g. aiocqhttp."""
+
+    def __init__(self, message_id="native", user="10001", group="20001"):
+        self.group, self.user = group, user
+        self.message_obj = SimpleNamespace(message_id=message_id, raw_message={})
+        self.send = AsyncMock()
+
+    def get_group_id(self):
+        return self.group
+
+    def get_sender_id(self):
+        return self.user
+
+    def get_sender_name(self):
+        return "群友"
+
+    def get_platform_id(self):
+        return "aiocqhttp"
+
+    def stop_event(self):
+        pass
+
+    def plain_result(self, text):
+        return ("plain", text)
+
+    def chain_result(self, chain):
+        return ("chain", chain)
+
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_and_private_scenes_do_not_write_or_upload(self):
@@ -157,6 +193,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             "astrbot.api",
             "astrbot.api.event",
             "astrbot.api.star",
+            "astrbot.api.message_components",
             "astrbot.core",
             "astrbot.core.platform",
             "astrbot.core.platform.sources",
@@ -189,6 +226,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         modules["astrbot.api.event"].AstrMessageEvent = OfficialEvent
         modules["astrbot.api.event"].filter = SimpleNamespace(
             command=command, permission_type=permission, PermissionType=SimpleNamespace(ADMIN=1)
+        )
+        modules["astrbot.api.message_components"].Plain = lambda text: ("text", text)
+        modules["astrbot.api.message_components"].Image = SimpleNamespace(
+            fromBytes=lambda data: ("image", data)
         )
         modules["astrbot.api.star"].Context = object
         modules["astrbot.api.star"].Star = Star
@@ -336,6 +377,43 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.draw(OfficialEvent("retry-local"))
         user = await self.plugin.db.identify("app", "member", "group-a", "")
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
+
+    async def test_non_official_group_sends_local_cards_through_astrbot(self):
+        self.plugin.publisher.publish = AsyncMock(side_effect=AssertionError("No host expected"))
+        for command, args in (
+            (self.plugin.draw, ()),
+            (self.plugin.atlas, (1,)),
+            (self.plugin.pen, ()),
+            (self.plugin.ranking, ("数量",)),
+        ):
+            event = NativeEvent(command.__name__)
+            await command(event, *args)
+            kind, chain = event.send.await_args.args[0]
+            self.assertEqual(kind, "chain")
+            self.assertEqual([part[0] for part in chain], ["image"])
+            self.assertIsInstance(chain[0][1], bytes)
+        event = NativeEvent("draw")
+        await self.plugin.draw(event)
+        event.send.assert_not_awaited()
+        self.plugin.transport.request.assert_not_awaited()
+        self.plugin.transport.upload_image.assert_not_awaited()
+        user = await self.plugin.db.identify("aiocqhttp", "10001", "20001", "")
+        self.assertEqual(user["nickname"], "群友")
+        self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
+
+    async def test_non_official_text_and_failures_use_astrbot_send(self):
+        event = NativeEvent("alias")
+        await self.plugin.alias(event, "自定义称呼")
+        event.send.assert_awaited_once_with(("chain", [("text", "称呼已经保存啦。")]))
+        event = NativeEvent("diagnose")
+        await self.plugin.diagnose(event)
+        event.send.assert_awaited_once_with(
+            ("plain", "小猪诊断仅用于检查 QQ 官方机器人的图片转存链路。")
+        )
+        event = NativeEvent("private", group="")
+        await self.plugin.draw(event)
+        event.send.assert_awaited_once_with(("plain", "今日小猪收集版请在群聊中使用。"))
+        self.plugin.transport.request.assert_not_awaited()
 
     async def test_cleanup_runs_independently_after_backup_failure(self):
         self.plugin.db.backup = AsyncMock(side_effect=OSError("backup disk unavailable"))
