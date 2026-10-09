@@ -50,6 +50,12 @@ class OfficialEvent:
     def plain_result(self, text):
         return text
 
+    def chain_result(self, chain):
+        return chain
+
+    def get_sender_name(self):
+        return getattr(getattr(self.message_obj.raw_message, "author", None), "username", "")
+
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_and_private_scenes_do_not_write_or_upload(self):
@@ -157,6 +163,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             "astrbot.api",
             "astrbot.api.event",
             "astrbot.api.star",
+            "astrbot.api.message_components",
             "astrbot.core",
             "astrbot.core.platform",
             "astrbot.core.platform.sources",
@@ -190,6 +197,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         modules["astrbot.api.event"].filter = SimpleNamespace(
             command=command, permission_type=permission, PermissionType=SimpleNamespace(ADMIN=1)
         )
+        class DummyImage:
+            @classmethod
+            def fromBytes(cls, data):
+                return cls()
+        modules["astrbot.api.message_components"].Image = DummyImage
         modules["astrbot.api.star"].Context = object
         modules["astrbot.api.star"].Star = Star
         modules["astrbot.api.star"].StarTools = SimpleNamespace(get_data_dir=lambda name: self.root)
@@ -300,11 +312,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.settings = self.plugin.sender.settings = config
         self.plugin.publisher.publish = AsyncMock(side_effect=AssertionError("No host expected"))
         for command in (self.plugin.draw, self.plugin.atlas, self.plugin.pen, self.plugin.ranking):
-            await command(OfficialEvent(command.__name__))
-            payload = self.plugin.transport.request.await_args.args[1]
-            self.assertEqual(payload["msg_type"], 7)
-            self.assertNotIn("keyboard", payload)
-            self.assertNotIn("markdown", payload)
+            event = OfficialEvent(command.__name__)
+            await command(event)
+            event.send.assert_awaited()
         self.plugin.publisher.publish.assert_not_awaited()
         self.assertFalse((self.root / "cards").exists())
         self.assertFalse((self.root / "thumbnails").exists())
@@ -322,18 +332,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("keyboard", payload)
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
 
-    async def test_local_upload_failure_preserves_collection(self):
+    async def test_local_send_preserves_collection(self):
         from astrbot_plugin_piggy.core.config import Settings
-        from astrbot_plugin_piggy.core.delivery import QQError
 
         self.plugin.settings = self.plugin.sender.settings = Settings(display={"draw": False})
-        self.plugin.transport.upload_image.side_effect = QQError(123, 401)
-        await self.plugin.draw(OfficialEvent("failed-local"))
-        self.assertIn(
-            "QQ 本地图片上传失败", self.plugin.transport.request.await_args.args[1]["content"]
-        )
-        self.plugin.transport.upload_image.side_effect = None
-        await self.plugin.draw(OfficialEvent("retry-local"))
+        event = OfficialEvent("local-test")
+        await self.plugin.draw(event)
+        event.send.assert_awaited_once()
         user = await self.plugin.db.identify("app", "member", "group-a", "")
         self.assertEqual((await self.plugin.db.collection(user["id"]))["total"], 1)
 

@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from botocore.exceptions import ClientError
 from PIL import Image
-from test_delivery_storage import FakeHost, FakeTransport, settings
+try:
+    from .test_delivery_storage import FakeHost, FakeTransport, settings
+except ImportError:
+    from test_delivery_storage import FakeHost, FakeTransport, settings
 
 from core.avatars import Avatars
 from core.config import PiggyError, Settings
@@ -30,6 +33,8 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         self.event = SimpleNamespace(
             message_obj=SimpleNamespace(message_id="event"),
             get_group_id=lambda: "group",
+            chain_result=lambda chain: chain,
+            send=AsyncMock(),
         )
         self.transport = FakeTransport()
         self.transport.upload_image = AsyncMock(return_value="file-info")
@@ -43,77 +48,13 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    async def test_local_without_host_is_one_media_message_without_md_or_buttons(self):
+    async def test_local_without_host_sends_via_astrbot_event(self):
         await self.sender.send(self.event, "app", self.message)
         await self.sender.send(self.event, "app", self.message)
-        self.transport.upload_image.assert_awaited_once_with(self.event, b"png-data")
-        self.publisher.publish.assert_not_awaited()
-        self.assertEqual(
-            self.transport.payloads,
-            [
-                {
-                    "msg_type": 7,
-                    "msg_id": "event",
-                    "msg_seq": 100,
-                    "media": {"file_info": "file-info"},
-                }
-            ],
-        )
-
-    async def test_upload_retries_are_bounded_and_do_not_send_on_failure(self):
-        self.transport.upload_image.side_effect = QQError(0, 0, uncertain=True)
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            with self.assertRaisesRegex(PiggyError, "QQ 本地图片上传失败.*3/3"):
-                await self.sender.send(self.event, "app", self.message)
-        self.assertEqual(self.transport.upload_image.await_count, 3)
-        self.assertFalse(self.transport.payloads)
-
-    async def test_upload_auth_failure_is_not_retried(self):
-        self.transport.upload_image.side_effect = QQError(123, 401)
-        with self.assertRaisesRegex(PiggyError, "123.*401.*1/3"):
-            await self.sender.send(self.event, "app", self.message)
-        self.assertEqual(self.transport.upload_image.await_count, 1)
-
-    async def test_reported_upload_rejection_obeys_upload_budget(self):
-        self.sender.settings = replace(self.config, upload_retry_count=10, image_retry_count=0)
-        self.transport.upload_image.side_effect = [QQError(40034141, 400)] * 10 + ["file-info"]
-        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
-            await self.sender.send(self.event, "app", self.message)
-        self.assertEqual(self.transport.upload_image.await_count, 11)
-        self.assertEqual(sleep.await_count, 10)
-        self.assertEqual(len(self.transport.payloads), 1)
-
-    async def test_reported_local_send_rejection_reuses_uploaded_media(self):
-        self.sender.settings = replace(self.config, image_retry_count=10)
-        self.transport.failures = [QQError(40034141, 400) for _ in range(11)]
-        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
-            with self.assertRaises(QQError):
-                await self.sender.send(self.event, "app", self.message)
-        self.assertEqual(len(self.transport.payloads), 11)
-        self.assertEqual(sleep.await_count, 10)
-        self.transport.upload_image.assert_awaited_once()
-        self.publisher.publish.assert_not_awaited()
-
-    async def test_local_uncertain_delivery_reuses_sequence_without_reupload(self):
-        self.transport.failures = [QQError(0, 0, True), QQError(40054005, 400)]
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await self.sender.send(self.event, "app", self.message)
-        self.assertEqual([p["msg_seq"] for p in self.transport.payloads], [100, 100])
-        self.assertEqual(self.transport.upload_image.await_count, 1)
-
-    async def test_local_invalid_media_refreshes_only_qq_upload(self):
-        self.transport.failures = [QQError(304080, 400)]
-        self.transport.upload_image.side_effect = ["old", "new"]
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await self.sender.send(self.event, "app", self.message)
-        self.assertEqual([p["msg_seq"] for p in self.transport.payloads], [100, 101])
-        self.assertEqual(self.transport.payloads[-1]["media"], {"file_info": "new"})
-        self.publisher.publish.assert_not_awaited()
-
-    async def test_expired_deadline_prevents_qq_upload(self):
-        with self.assertRaises(PiggyError):
-            await self.sender.send(self.event, "app", self.message, time.monotonic() - 1)
         self.transport.upload_image.assert_not_awaited()
+        self.publisher.publish.assert_not_awaited()
+        self.assertEqual(self.event.send.await_count, 1)
+        self.assertFalse(self.transport.payloads)
 
     async def test_temp_cache_rotates_keys_and_does_not_alias_permanent_assets(self):
         host = FakeHost()

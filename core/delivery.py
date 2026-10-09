@@ -202,17 +202,20 @@ class Sender:
             return
         sequence = receipt["sequence"]
         deadline = deadline if deadline is not None else time.monotonic() + 240
-        urls = []
-        media = None
         if message.local:
             if len(message.images) != 1 or not isinstance(message.images[0], bytes):
                 raise PiggyError("普通图片消息必须包含一张完整的渲染卡片。")
-            media = await self._upload_local(event, message.images[0], deadline)
-        else:
-            for path in message.images:
-                urls.append(
-                    await self.publisher.publish(path, force=force_upload, deadline=deadline)
-                )
+            from astrbot.api.message_components import Image
+
+            await event.send(event.chain_result([Image.fromBytes(message.images[0])]))
+            await self.db.delivery_update(key, sequence, True)
+            return
+
+        urls = []
+        for path in message.images:
+            urls.append(
+                await self.publisher.publish(path, force=force_upload, deadline=deadline)
+            )
         refreshed = False
         for attempt in range(self.settings.image_retry_count + 1):
             if time.monotonic() >= deadline:

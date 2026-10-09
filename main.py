@@ -94,20 +94,23 @@ class PiggyPlugin(Star):
             await asyncio.sleep(3600)
 
     async def _handle(self, event: AstrMessageEvent, command: str, args: tuple = ()):
-        if (
-            not isinstance(event, QQOfficialMessageEvent)
-            or not isinstance(event.message_obj.raw_message, GroupMessage)
-            or not event.get_group_id()
-        ):
-            await event.send(event.plain_result("今日小猪收集版目前支持 QQ 官方机器人群聊。"))
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        raw_type = type(raw).__name__
+        # Channel messages in botpy are 'Message', private messages are 'C2CMessage'
+        if raw_type in ("Message", "C2CMessage") or not event.get_group_id():
+            await event.send(event.plain_result("今日小猪收集版请在群聊中使用。"))
             return
         event.stop_event()
         if self.stopping:
             return
-        token = event.bot.api._http._token
-        app_id = str(token.app_id or "")
-        if not app_id or not event.message_obj.message_id:
-            await event.send(event.plain_result("未取得官方消息标识，暂时无法处理收藏。"))
+        app_id = ""
+        token = getattr(getattr(getattr(event, "bot", None), "api", None), "_http", None)
+        if token and hasattr(token, "_token"):
+            app_id = str(token._token.app_id or "")
+        if not app_id:
+            app_id = str(event.get_platform_id() or event.get_platform_name() or "default")
+        if not event.message_obj.message_id:
+            await event.send(event.plain_result("未取得有效消息标识，暂时无法处理收藏。"))
             return
         key = message_key(event, app_id)
         if key in self.inflight:
@@ -156,12 +159,14 @@ class PiggyPlugin(Star):
             receipt = await self.db.delivery(message_key(event, app_id))
             if receipt["done"]:
                 return
-            raw = event.message_obj.raw_message
-            nickname = getattr(getattr(raw, "author", None), "username", "") or ""
+            nickname = event.get_sender_name() or ""
             if not nickname:
-                nickname = (getattr(raw, "raw_data", {}) or {}).get("author", {}).get(
-                    "username", ""
-                ) or ""
+                raw = event.message_obj.raw_message
+                nickname = getattr(getattr(raw, "author", None), "username", "") or ""
+                if not nickname:
+                    nickname = (getattr(raw, "raw_data", {}) or {}).get("author", {}).get(
+                        "username", ""
+                    ) or ""
             user = await self.db.identify(
                 app_id, event.get_sender_id(), event.get_group_id(), nickname
             )
@@ -256,17 +261,23 @@ class PiggyPlugin(Star):
 
     async def _failure(self, event, text: str):
         try:
-            await self.transport.request(
-                event,
-                {
-                    "msg_type": 0,
-                    "content": text,
-                    "msg_id": event.message_obj.message_id,
-                    "msg_seq": 9999,
-                },
-            )
-        except Exception as exc:
-            logger.warning("[piggy] Could not send failure notice (%s).", type(exc).__name__)
+            if hasattr(self.transport, "request") and getattr(getattr(event, "bot", None), "api", None):
+                await self.transport.request(
+                    event,
+                    {
+                        "msg_type": 0,
+                        "content": text,
+                        "msg_id": event.message_obj.message_id,
+                        "msg_seq": 9999,
+                    },
+                )
+            else:
+                await event.send(event.plain_result(text))
+        except Exception:
+            try:
+                await event.send(event.plain_result(text))
+            except Exception as exc:
+                logger.warning("[piggy] Could not send failure notice (%s).", type(exc).__name__)
 
     @filter.command("今日小猪", alias={"抽小猪"})
     async def draw(self, event: AstrMessageEvent):
