@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
 # One sheet contains the entire initial catalog. Limits keep future expansions
 # below QQ's practical image size and the renderer's memory budget.
@@ -194,14 +194,14 @@ class Canvas:
             self.fonts[size, bold] = face
         return self.fonts[size, bold]
 
-    def text(self, text, x, y, size=26, color=TEXT, bold=False, width=None):
+    def text(self, text, x, y, size=26, color=TEXT, bold=False, width=None, anchor="la"):
         text = str(text)
         face = self.font(size, bold)
         if width is not None and self.draw.textlength(text, font=face) > width:
             while text and self.draw.textlength(text + "…", font=face) > width:
                 text = text[:-1]
             text += "…"
-        self.draw.text((x, y), text, font=face, fill=color)
+        self.draw.text((x, y), text, font=face, fill=color, anchor=anchor)
 
     def wrap(self, text, size, width):
         lines = []
@@ -221,45 +221,59 @@ def render_today(
 ) -> Card:
     pig = result["pig"]
     canvas = Canvas(root, WIDTH, 1)
-    description = " ".join(pig["description"].split())
-    analysis = " ".join(pig["analysis"].split())
-    lines = canvas.wrap(f"{description}\n\n{analysis}", 28, 880)
+    lines = canvas.wrap(" ".join(pig["analysis"].split()), 27, 872)
     canvas.image.close()
-    description_y = 870
-    panel_bottom = description_y + 58 + 43 * len(lines)
-    canvas = Canvas(root, WIDTH, panel_bottom + 262)
-    canvas.text("PIGGY  /  DAILY", 58, 34, 18, ACCENT, True)
-    canvas.text("今日小猪", 54, 76, 56, bold=True)
-    canvas.text(name, 58, 158, 25, SUB, width=700)
-    canvas.text(result["day"], 826, 43, 19, SUB)
-    canvas.draw.rounded_rectangle((56, 222, 1024, 824), radius=32, fill="#ffffff")
-    canvas.draw.rounded_rectangle((84, 244, 994, 704), radius=25, fill="#f9f4ed")
+    panel_top = 804
+    stats_top = panel_top + 52 + 44 * len(lines) + 24
+    stats_bottom = stats_top + (222 if protection else 190)
+    canvas = Canvas(root, WIDTH, stats_bottom + 56)
+    canvas.text("PIGGY  /  DAILY", 58, 40, 18, ACCENT, True)
+    canvas.text(result["day"], 1024, 40, 19, SUB, anchor="ra")
+    canvas.text("今日小猪", 56, 66, 44, bold=True)
+    canvas.text(name, 58, 126, 24, SUB, width=700)
+    canvas.text(state, 1024, 128, 22, ACCENT, True, width=240, anchor="ra")
+
+    canvas.draw.rounded_rectangle((56, 180, 1024, 780), radius=32, fill="#ffffff")
     with Image.open(root / "assets" / pig["asset"]) as original:
-        art = original.convert("RGBA")
-        art.thumbnail((580, 418), Image.Resampling.LANCZOS)
-        canvas.image.paste(art, ((WIDTH - art.width) // 2, 265 + (418 - art.height) // 2), art)
-        art.close()
-    canvas.text(pig["name"], 88, 734, 43, bold=True, width=566)
-    canvas.text(state, 674, 755, 22, ACCENT, width=314)
-    canvas.draw.rounded_rectangle((56, description_y, 1024, panel_bottom), radius=28, fill=PANEL)
+        # Most assets are 240px; scale the whole canvas so intentionally tiny pigs stay tiny.
+        art = ImageOps.contain(original.convert("RGBA"), (400, 400), Image.Resampling.LANCZOS)
+    # Round the corners of opaque full-bleed paintings; transparent art is unaffected.
+    mask = Image.new("L", art.size)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, *art.size), radius=28, fill=255)
+    mask = ImageChops.multiply(mask, art.getchannel("A"))
+    canvas.image.paste(art, (540 - art.width // 2, 424 - art.height // 2), mask)
+    art.close()
+    mask.close()
+    canvas.text(pig["name"], 540, 656, 48, bold=True, width=860, anchor="mt")
+    canvas.text(
+        f"「{' '.join(pig['description'].split())}」", 540, 724, 26, ACCENT, width=860, anchor="mt"
+    )
+
+    canvas.draw.rounded_rectangle((56, panel_top, 1024, stats_top - 24), radius=28, fill=PANEL)
     for i, line in enumerate(lines):
-        canvas.text(line, 94, description_y + 26 + i * 43, 28)
-    y = panel_bottom + 35
-    for x, label, value in (
-        (68, "本猪累计", f"{result['count']} 次"),
-        (412, "累计收获", f"{progress['total']} 只"),
-        (735, "已解锁", f"{progress['unlocked']} / {progress['active_total']}"),
+        canvas.text(line, 104, panel_top + 30 + i * 44, 27)
+
+    canvas.draw.rounded_rectangle((56, stats_top, 1024, stats_bottom), radius=28, fill="#ffffff")
+    for cx, label, value in (
+        (217, "本猪累计", f"{result['count']} 次"),
+        (540, "累计收获", f"{progress['total']} 只"),
+        (863, "已解锁", f"{progress['unlocked']} / {progress['active_total']}"),
     ):
-        canvas.text(label, x, y, 21, SUB)
-        canvas.text(value, x, y + 39, 35, bold=True, width=280)
-    ratio = progress["unlocked"] / progress["active_total"] if progress["active_total"] else 0
-    y += 111
-    canvas.draw.rounded_rectangle((68, y, 1012, y + 10), radius=5, fill=TRACK)
+        canvas.text(label, cx, stats_top + 28, 20, SUB, anchor="mt")
+        canvas.text(value, cx, stats_top + 60, 36, bold=True, width=280, anchor="mt")
+    for x in (378, 702):
+        canvas.draw.line((x, stats_top + 32, x, stats_top + 104), fill=BORDER, width=2)
+    total = progress["active_total"]
+    ratio = min(progress["unlocked"] / total, 1) if total else 0
+    bar = stats_top + 140
+    canvas.draw.rounded_rectangle((96, bar, 880, bar + 10), radius=5, fill=TRACK)
     if ratio:
         canvas.draw.rounded_rectangle(
-            (68, y, 68 + max(10, int(944 * min(ratio, 1))), y + 10), radius=5, fill=ACCENT
+            (96, bar, 96 + max(10, int(784 * ratio)), bar + 10), radius=5, fill=ACCENT
         )
-    canvas.text(protection or "每天一只小猪，慢慢填满收藏。", 68, y + 34, 19, SUB)
+    canvas.text(f"{ratio:.1%}", 984, bar + 5, 20, ACCENT, True, anchor="rm")
+    if protection:
+        canvas.text(protection, 96, bar + 34, 19, SUB)
     return finish(canvas.image)
 
 
