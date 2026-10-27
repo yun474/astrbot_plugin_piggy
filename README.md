@@ -8,7 +8,7 @@
 
 ✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 / 其他群聊平台 · 每日抽猪与跨群收藏 ✨
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-a3be8c.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-a3be8c.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-89b4fa.svg)](https://www.python.org/)
 [![AstrBot 3.5.3+](https://img.shields.io/badge/AstrBot-3.5.3%2B-f2cd94.svg)](https://github.com/AstrBotDevs/AstrBot)
 [![作者 yun474](https://img.shields.io/badge/作者-yun474-f5b7c7.svg)](https://github.com/yun474)
@@ -149,7 +149,7 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 
 ## 💛 致谢
 
-初始猪库与图片来自 [MegSopern/astrbot_plugin_rollpig](https://github.com/MegSopern/astrbot_plugin_rollpig/tree/42490b1b88367260c137c1147b05a3c052f22d33)，感谢前辈们留下的一群小猪~ <br>项目代码遵循 [MIT 许可证](LICENSE)；随包字体 [Noto Sans SC](https://github.com/google/fonts/tree/main/ofl/notosanssc) 遵循 `resources/fonts/OFL.txt` 中的 SIL Open Font License。
+初始猪库与图片来自 [MegSopern/astrbot_plugin_rollpig](https://github.com/MegSopern/astrbot_plugin_rollpig/tree/42490b1b88367260c137c1147b05a3c052f22d33)，感谢前辈们留下的一群小猪~ <br>项目代码遵循 [AGPL-3.0 许可证](LICENSE)；来自上游的初始猪库与图片保留其 MIT 许可声明，见 [`resources/LICENSE-rollpig.txt`](resources/LICENSE-rollpig.txt)；随包字体 [Noto Sans SC](https://github.com/google/fonts/tree/main/ofl/notosanssc) 遵循 `resources/fonts/OFL.txt` 中的 SIL Open Font License。
 
 ---
 
@@ -157,7 +157,7 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 
 喜欢的话，给云云点一颗 ⭐ 吧！
 
-[更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_piggy/issues) · [MIT License](LICENSE)
+[更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_piggy/issues) · [AGPL-3.0 License](LICENSE)
 
 **插件问题反馈 QQ 群：947667614**
 
