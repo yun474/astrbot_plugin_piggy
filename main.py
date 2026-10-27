@@ -20,9 +20,16 @@ from .core.config import PiggyError, Settings, migrate_host_config
 from .core.database import Database
 from .core.delivery import Message, QQError, QQTransport, Sender, message_key
 from .core.diagnostics import exception_detail
+from .core.material import MaterialLibrary
 from .core.rendering import clean_cards
 from .core.storage import ImagePublisher, UploadError
-from .core.views import collection_message, ranking_message, today_message
+from .core.views import (
+    collection_message,
+    material_message,
+    purge_message,
+    ranking_message,
+    today_message,
+)
 
 MAX_INFLIGHT = 12
 REQUEST_TIMEOUT = 240
@@ -39,7 +46,15 @@ class PiggyPlugin(Star):
         self.db = Database(self.root)
         self.publisher = ImagePublisher(self.settings, self.db)
         self.transport = QQTransport(self.settings.request_timeout)
-        self.sender = Sender(self.settings, self.db, self.publisher, self.transport, logger=logger)
+        self.material = MaterialLibrary(self.settings, self.transport, logger=logger)
+        self.sender = Sender(
+            self.settings,
+            self.db,
+            self.publisher,
+            self.transport,
+            logger=logger,
+            material=self.material,
+        )
         self.avatars = Avatars()
         self.ready = False
         self.init_lock = asyncio.Lock()
@@ -100,17 +115,17 @@ class PiggyPlugin(Star):
         if not event.get_group_id() or (
             official and not isinstance(event.message_obj.raw_message, GroupMessage)
         ):
-            await event.send(event.plain_result("今日小猪收集版请在群聊中使用。"))
+            await self._send_native(event, event.plain_result("今日小猪收集版请在群聊中使用。"))
             return
         event.stop_event()
         if self.stopping:
             return
-        # Non-official platforms keep separate accounts per AstrBot platform instance.
+        # 非官机平台按 AstrBot 平台实例分别记录账号。
         app_id = (
             str(event.bot.api._http._token.app_id or "") if official else event.get_platform_id()
         )
         if not app_id or not event.message_obj.message_id:
-            await event.send(event.plain_result("未取得消息标识，暂时无法处理收藏。"))
+            await self._send_native(event, event.plain_result("未取得消息标识，暂时无法处理收藏。"))
             return
         key = message_key(event, app_id)
         if key in self.inflight:
@@ -118,7 +133,7 @@ class PiggyPlugin(Star):
             return
         owner = (app_id, event.get_sender_id())
         if owner in self.active_users or len(self.inflight) >= MAX_INFLIGHT:
-            # A burst must not create another unbounded queue of busy replies.
+            # 突发请求不能再堆积出无上限的繁忙提示队列。
             if self.busy_notice is None or self.busy_notice.done():
                 self.busy_notice = asyncio.create_task(
                     self._failure(event, "小猪正在处理请求，请等当前请求完成后再试。")
@@ -161,7 +176,7 @@ class PiggyPlugin(Star):
             if receipt["done"]:
                 return
             official = isinstance(event, QQOfficialMessageEvent)
-            # Markdown, keyboards and image hosts are QQ official features; others get cards.
+            # Markdown、按钮和图床是 QQ 官机功能；其他平台发送卡片图片。
             settings = (
                 self.settings
                 if official
@@ -210,7 +225,7 @@ class PiggyPlugin(Star):
                 if kind not in {"种类", "数量"}:
                     raise PiggyError("用法：小猪排行 种类/数量")
                 boards = await self.db.rankings(app_id, event.get_group_id())
-                # OneBot sender ids are QQ numbers; other platforms have no QQ avatar to fetch.
+                # OneBot 的发送者 ID 就是 QQ 号；其他平台没有可获取的 QQ 头像。
                 onebot = not official and event.get_platform_name() == "aiocqhttp"
                 avatars = (
                     await self.avatars.get_many(
@@ -236,6 +251,22 @@ class PiggyPlugin(Star):
                 async with self.maintenance_lock:
                     await self.db.backup(self.settings.backup_keep)
                 message = Message("备份已保存到插件数据目录 backups，包含数据库、猪库及历史素材。")
+            elif command == "material":
+                if not official:
+                    raise PiggyError("小猪素材库仅用于查看 QQ 官方机器人的素材库占用。")
+                action = args[0]
+                if action in {"删除", "删除缓存", "删除全部"}:
+                    result = await self.material.purge(
+                        event, app_id, deadline, everything=action == "删除全部"
+                    )
+                    message = purge_message(result, action == "删除全部")
+                elif action:
+                    raise PiggyError("用法：小猪素材库 [删除缓存|删除全部]")
+                else:
+                    usage = await self.material.usage(event, app_id, deadline)
+                    message = material_message(
+                        usage, self.settings.provider == "qq", self.settings.material_cache_minutes
+                    )
             else:
                 if not official:
                     raise PiggyError("小猪诊断仅用于检查 QQ 官方机器人的图片转存链路。")
@@ -253,8 +284,8 @@ class PiggyPlugin(Star):
             else:
                 chain = [Plain(message.text)] if message.text else []
                 chain += [Image.fromBytes(image) for image in message.images]
-                await event.send(event.chain_result(chain))
-                await self.db.delivery_update(key, receipt["sequence"], True)
+                if await self._send_native(event, event.chain_result(chain), deadline):
+                    await self.db.delivery_update(key, receipt["sequence"], True)
         except PiggyError as exc:
             if isinstance(exc, UploadError):
                 logger.warning(
@@ -283,19 +314,38 @@ class PiggyPlugin(Star):
             )
             await self._failure(event, "处理暂时失败，请联系管理员查看插件日志。")
 
+    async def _send_native(self, event, message, deadline: float | None = None) -> bool:
+        timeout = self.settings.request_timeout
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            logger.warning("[piggy] Native reply deadline expired before sending.")
+            return False
+        try:
+            await asyncio.wait_for(event.send(message), timeout)
+        except asyncio.TimeoutError:
+            # 消息可能已经送达。保留未完成的发送记录，
+            # 不再发送通知，也不自动重试。
+            logger.warning("[piggy] Native send timed out; delivery is unconfirmed.")
+            return False
+        return True
+
     async def _failure(self, event, text: str):
         try:
             if not isinstance(event, QQOfficialMessageEvent):
-                await event.send(event.plain_result(text))
+                await self._send_native(event, event.plain_result(text))
                 return
-            await self.transport.request(
-                event,
-                {
-                    "msg_type": 0,
-                    "content": text,
-                    "msg_id": event.message_obj.message_id,
-                    "msg_seq": 9999,
-                },
+            await asyncio.wait_for(
+                self.transport.request(
+                    event,
+                    {
+                        "msg_type": 0,
+                        "content": text,
+                        "msg_id": event.message_obj.message_id,
+                        "msg_seq": 9999,
+                    },
+                ),
+                self.settings.request_timeout,
             )
         except Exception as exc:
             logger.warning("[piggy] Could not send failure notice (%s).", type(exc).__name__)
@@ -343,9 +393,18 @@ class PiggyPlugin(Star):
         """仅管理员：绕过缓存上传测试猪图，发送消息并检查 QQ 图片转存链路。"""
         await self._handle(event, "diagnose")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("小猪素材库")
+    async def material_usage(self, event: AstrMessageEvent, action: str = ""):
+        """仅管理员：查看 QQ 素材库占用；附加「删除缓存」删除本插件素材，「删除全部」清空素材库。"""
+        # 开关关闭时不拦截事件，同名指令可交由其他插件处理。
+        if not self.settings.material_usage_command:
+            return
+        await self._handle(event, "material", (action,))
+
     async def terminate(self):
         self.stopping = True
-        # Drain active thread-backed work before closing clients; queued work skips execution.
+        # 关闭客户端前等待正在运行的线程任务完成；排队中的任务直接跳过。
         tasks = list(self.inflight.values())
         if self.busy_notice:
             tasks.append(self.busy_notice)
@@ -358,5 +417,6 @@ class PiggyPlugin(Star):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await self.publisher.close()
+        await self.material.close()
         await self.transport.close()
         await self.avatars.close()

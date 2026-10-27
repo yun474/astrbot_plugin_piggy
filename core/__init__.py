@@ -1,1 +1,1 @@
-"""Daily pig collection domain and integrations."""
+"""每日小猪收集的业务逻辑与平台集成。"""

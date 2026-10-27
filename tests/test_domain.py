@@ -43,7 +43,7 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
             (4, 100, 100, False),
             (5, 0, 0, False),
         ):
-            # Keep exactly one of the two species owned for each boundary check.
+            # 每次边界检查时，两种小猪只保留其中一种已收藏。
             await self.db.run(
                 lambda c: c.execute(
                     "DELETE FROM collections WHERE user_id=? AND pig_id<>?",
@@ -263,6 +263,24 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         self.manifest.write_text(json.dumps(definitions), "utf-8")
         with self.assertRaises(PiggyError):
             read_catalog(self.root)
+
+    async def test_multiline_names_are_normalized_and_old_snapshots_still_render(self):
+        definitions = json.loads(self.manifest.read_text("utf-8"))[:1]
+        definitions[0]["name"] = "第一行\n第二行\r\n第三行"
+        self.manifest.write_text(json.dumps(definitions), "utf-8")
+        pigs = read_catalog(self.root)
+        self.assertEqual(pigs[0]["name"], "第一行 第二行 第三行")
+        # 模拟本次修复前已生效的猪库和每日快照。
+        pigs[0]["name"] = definitions[0]["name"]
+        await self.db.catalog(pigs)
+        result = await self.db.draw(self.user["id"], "group-a", "event")
+        progress = await self.db.collection(self.user["id"])
+        config = Settings(display={"draw": False, "pen": False})
+        today = today_message(config, self.root, self.user, result, progress)
+        pen = await collection_message(config, self.root, self.user, progress, 1, False)
+        for message in (today, pen):
+            with Image.open(io.BytesIO(message.images[0])) as image:
+                image.verify()
 
     async def test_corrupt_or_disguised_image_preserves_accepted_catalog(self):
         definitions = json.loads(self.manifest.read_text("utf-8"))

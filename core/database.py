@@ -204,7 +204,7 @@ class Database:
                 elif not owned or (duplicate_pity and repeat_streak() >= duplicate_pity):
                     pool = unseen
                 else:
-                    # Integer comparison preserves the natural rate without rounding.
+                    # 使用整数比较，保持原始概率，避免取整误差。
                     threshold = min(len(owned) * 100, duplicate_rate_cap * len(available))
                     pool = owned if secrets.randbelow(100 * len(available)) < threshold else unseen
                 pig = dict(secrets.choice(pool))
@@ -366,8 +366,8 @@ class Database:
                             dict(p)
                             for p in dst.execute("SELECT * FROM pigs ORDER BY sort_order,id")
                         ]
-                    # Export the accepted catalog from the same DB snapshot. An administrator
-                    # may be editing the working JSON while this backup runs.
+                    # 从同一个数据库快照导出已生效的猪库。
+                    # 备份期间管理员可能正在编辑工作区 JSON。
                     manifest = [
                         {**p, "enabled": bool(p["enabled"]), "image": f"images/{p['asset']}"}
                         for p in pigs
@@ -397,6 +397,6 @@ class Database:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            # Threaded SQLite backup cannot be interrupted safely. Finish it before unload.
+            # 线程中的 SQLite 备份无法安全中断，卸载前需等待其完成。
             await task
             raise

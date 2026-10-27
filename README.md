@@ -8,14 +8,14 @@
 
 ✨ [AstrBot](https://github.com/AstrBotDevs/AstrBot) · QQ 官方机器人 / 其他群聊平台 · 每日抽猪与跨群收藏 ✨
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-a3be8c.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-a3be8c.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-89b4fa.svg)](https://www.python.org/)
 [![AstrBot 3.5.3+](https://img.shields.io/badge/AstrBot-3.5.3%2B-f2cd94.svg)](https://github.com/AstrBotDevs/AstrBot)
 [![作者 yun474](https://img.shields.io/badge/作者-yun474-f5b7c7.svg)](https://github.com/yun474)
 
 <img src="https://count.getloli.com/@yun474_astrbot_plugin_piggy?name=yun474_astrbot_plugin_piggy&theme=asoul&padding=7&offset=0&align=center&scale=1&pixelated=1&darkmode=auto" alt="访问计数小人" />
 
-[功能亮点](#features) · [效果预览](#preview) · [安装使用](#usage) · [R2 配置](#r2) · [猪库维护](#catalog) · [数据备份](#backup)
+[功能亮点](#features) · [效果预览](#preview) · [安装使用](#usage) · [图床配置](#r2) · [猪库维护](#catalog) · [数据备份](#backup)
 
 </div>
 
@@ -62,6 +62,7 @@
 | `小猪重载` | 管理员应用猪库修改 |
 | `小猪备份` | 管理员创建本地备份 |
 | `小猪诊断` | 管理员检查图床上传与 QQ 图片发送 |
+| `小猪素材库 [删除缓存/删除全部]` | 管理员查看或清理本机器人 QQ 素材库（可在配置中关闭） |
 
 每天按东八区自然日计算抽取次数。同一 QQ 官方机器人应用（或同一个 AstrBot 平台实例）下，收藏和每日抽取结果跨群共享；不同平台之间的收藏互不相通。
 
@@ -71,11 +72,25 @@
 
 <a id="r2"></a>
 
-## 🎛️ 图片发送方式与 R2 配置
+## 🎛️ 图片发送方式与图床配置
 
-插件可以直接向 QQ 发送图片，也可以通过图床发送带快捷按钮的消息。在插件配置的「消息展示」中，分别设置「今日小猪」「小猪图鉴」「我的猪圈」「小猪排行」是否使用图床。默认只有「今日小猪」开启图床；如果没有图床，请先关闭这个开关，其余功能默认可直接使用。
+插件可以直接向 QQ 发送图片，也可以通过图床发送带快捷按钮的消息。在插件配置的「消息展示」中，分别设置「今日小猪」「小猪图鉴」「我的猪圈」「小猪排行」是否使用图床。默认只有「今日小猪」开启图床，并使用免配置的「QQ 素材库」，装好即可直接使用。
 
-开启图床时，需要在插件配置中填写 R2 / S3 或 HTTP 图床信息；图片公网地址必须能由 QQ 直接访问。使用 R2 时，`endpoint` 填上传接口，`public_base_url` 填已绑定存储桶的公网域名，两者不要填反。若把图鉴、猪圈或排行也设为图床模式，建议给 R2 的 `piggy/temp/` 设置 7 天后删除的生命周期规则，避免临时卡片长期占用空间。
+### QQ 素材库（默认，免配置）
+
+「QQ 素材库」使用 QQ 官方机器人自带的 [素材管理接口](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/material-management.html)，无需自建图床，也无需填写任何参数：插件直接沿用 AstrBot 中已配置的 QQ 官方机器人 AppID 与凭据，接入多个机器人时按各自账号分别处理。默认每张图片随消息上传，消息发送结束后立即尝试删除，平台已为发出的消息保存图片副本，删除不影响群内已发送的图片。清理超时或失败时会转入后台重试，避免拖住回复；插件还会定期回收本插件超过 10 分钟的残留素材，跳过当前仍在发送的图片。
+
+- **100 张限制：** QQ 官方规定每个机器人最多保存 100 张有效素材，同一机器人上的其他插件共用这一额度。本插件同时最多处理 3 个请求，每条消息结束即删除，同一时间通常只临时占用几张；如因中断留下残图，插件重启后首次使用时会自动清理 10 分钟前上传、文件名以 `piggy-` 开头的图片，不会删除其他插件的素材。
+- **猪图缓存：** 「QQ 素材库配置」中的「猪图缓存时间」可设为 0–1440 分钟，默认 0 为即用即删。设置后，同一只小猪在缓存期内复用同一张素材，到期自动删除，可减少重复上传；图鉴、猪圈、排行卡片每次内容不同，始终即用即删。每张缓存猪图占用一格共用额度，额度已满时插件会先释放自己的缓存再重试；插件停用或重载时也会尽量删除缓存。
+- **频率限制：** 官方文档目前没有说明素材接口的调用频率限制，我们也还不清楚是否存在。每张图片需要额外调用申请上传、完成上传和删除三个接口；开启猪图缓存可减少这部分调用。
+- **自动降级：** 遇到频率限制、素材库已满或机器人没有接口权限时，插件会自动改为直接发送卡片图片（不带 Markdown 和按钮），保证消息照常送达，并在日志中记录原因。`小猪诊断` 不会降级，会直接提示具体原因。
+- **查看与清理：** 管理员发送 `小猪素材库`，可查看本机器人素材库的总占用、本插件（含缓存猪图）和其他插件各占几张，以及待清理的残留。发送 `小猪素材库 删除缓存` 删除本插件的全部素材；发送 `小猪素材库 删除全部` 清空整个素材库，**其他插件上传的素材也会被删除**，请谨慎使用。两种清理都会跳过正在发送的图片。该指令可在「图床配置 → QQ 素材库配置」中关闭；关闭后插件不响应该指令，切换到其他图床后仍按已保存的开关处理。
+
+素材接口刚上线不久，如果你遇到限流、额度或图片显示等问题，欢迎到 [Issues](https://github.com/yun474/astrbot_plugin_piggy/issues) 提交反馈，最好附上相关日志。
+
+### 自建图床
+
+需要在插件配置中填写 R2 / S3 或 HTTP 图床信息；图片公网地址必须能由 QQ 直接访问。使用 R2 时，`endpoint` 填上传接口，`public_base_url` 填已绑定存储桶的公网域名，两者不要填反。若把图鉴、猪圈或排行也设为图床模式，建议给 R2 的 `piggy/temp/` 设置 7 天后删除的生命周期规则，避免临时卡片长期占用空间。
 
 QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床配置，所有卡片都通过 AstrBot 直接发图，没有快捷按钮；`小猪诊断` 只用于 QQ 官方机器人。
 
@@ -83,7 +98,7 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 
 ## ⚙️ 配置项说明
 
-以下是插件配置页中的选项及默认值。不使用图床时，关闭四个「使用图床」开关即可，图床相关选项无需填写。
+以下是插件配置页中的选项及默认值。使用默认的「QQ 素材库」或不使用图床时，图床相关选项均无需填写；不使用图床时关闭四个「使用图床」开关即可。
 
 | 消息与日常设置 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -94,9 +109,9 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 | `command_prefix`（快捷指令唤醒词） | 留空 | 使用自定义唤醒词时，填与 AstrBot 相同的内容 |
 | `backup_keep`（本地备份保留份数） | `7` | 自动和手动备份最多保留的份数 |
 
-**图床配置：** 打开「展开图床配置」，在 `image_host.provider` 中选择图床，页面只显示对应参数。收起仅影响显示，不会停用图床。各类型独立保存，切换回来无需重填；四个消息功能共用当前选中的图床。
+**图床配置：** 打开「展开图床配置」，在 `image_host.provider` 中选择图床，页面只显示对应参数。收起仅影响显示，不会停用图床。各类型独立保存，切换回来无需重填；四个消息功能共用当前选中的图床。从旧版本升级时，已保存的图床选择保持不变；如需改用 QQ 素材库，在此切换即可。
 
-可选 Cloudflare R2（默认）、AWS S3、阿里云 OSS、腾讯云 COS、七牛云 Kodo、MinIO、Backblaze B2、DigitalOcean Spaces、其他 S3 兼容存储、兰空 Lsky Pro V2 和自定义 HTTP。对象存储通过 S3 兼容接口上传，请使用服务商提供的 S3 端点与凭据。
+可选 QQ 素材库（默认）、Cloudflare R2、AWS S3、阿里云 OSS、腾讯云 COS、七牛云 Kodo、MinIO、Backblaze B2、DigitalOcean Spaces、其他 S3 兼容存储、兰空 Lsky Pro V2 和自定义 HTTP。对象存储通过 S3 兼容接口上传，请使用服务商提供的 S3 端点与凭据。
 
 旧版配置首次加载时自动保存到「其他 S3 兼容存储」和「自定义 HTTP」分组，保留原选中的上传方式；已有新分组配置优先。旧 R2 配置会保留在「其他 S3 兼容存储」中，仍可照常使用。
 
@@ -149,7 +164,7 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 
 ## 💛 致谢
 
-初始猪库与图片来自 [MegSopern/astrbot_plugin_rollpig](https://github.com/MegSopern/astrbot_plugin_rollpig/tree/42490b1b88367260c137c1147b05a3c052f22d33)，感谢前辈们留下的一群小猪~ <br>项目代码遵循 [MIT 许可证](LICENSE)；随包字体 [Noto Sans SC](https://github.com/google/fonts/tree/main/ofl/notosanssc) 遵循 `resources/fonts/OFL.txt` 中的 SIL Open Font License。
+初始猪库与图片来自 [MegSopern/astrbot_plugin_rollpig](https://github.com/MegSopern/astrbot_plugin_rollpig/tree/42490b1b88367260c137c1147b05a3c052f22d33)，感谢前辈们留下的一群小猪~ <br>项目代码遵循 [AGPL-3.0 许可证](LICENSE)；来自上游的初始猪库与图片保留其 MIT 许可声明，见 [`resources/LICENSE-rollpig.txt`](resources/LICENSE-rollpig.txt)；随包字体 [Noto Sans SC](https://github.com/google/fonts/tree/main/ofl/notosanssc) 遵循 `resources/fonts/OFL.txt` 中的 SIL Open Font License。
 
 ---
 
@@ -157,9 +172,10 @@ QQ 官方机器人以外的平台（如 aiocqhttp / NapCat 等）会忽略图床
 
 喜欢的话，给云云点一颗 ⭐ 吧！
 
-[更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_piggy/issues) · [MIT License](LICENSE)
+[更新日志](CHANGELOG.md) · [反馈问题](https://github.com/yun474/astrbot_plugin_piggy/issues) · [AGPL-3.0 License](LICENSE)
 
-**插件问题反馈 QQ 群：947667614**
+**交流催更 QQ 群：947667614**
+> 有插件问题/bug/建议请优先提交issue，加群请注明来意。
 
 </div>
 

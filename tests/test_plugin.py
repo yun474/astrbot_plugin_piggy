@@ -58,7 +58,7 @@ class OfficialEvent:
 
 
 class NativeEvent:
-    """A non-official AstrBot event, e.g. aiocqhttp."""
+    """非官机的 AstrBot 事件，例如 aiocqhttp。"""
 
     def __init__(self, message_id="native", user="10001", group="20001"):
         self.group, self.user = group, user
@@ -109,7 +109,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             await self.plugin.limit.acquire()
 
-        # Use an async side effect so the sole overload notice stays in flight.
+        # 使用异步副作用，让唯一一条过载提示保持发送中。
         async def busy(*args):
             await release.wait()
 
@@ -419,6 +419,72 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         event.send.assert_awaited_once_with(("plain", "今日小猪收集版请在群聊中使用。"))
         self.plugin.transport.request.assert_not_awaited()
 
+    async def test_native_send_timeout_releases_worker_and_allows_shutdown(self):
+        self.plugin.settings = replace(self.plugin.settings, request_timeout=0.05)
+        self.plugin.db.backup = AsyncMock()
+        await self.plugin.initialize()
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def stalled_send(*args):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        event = NativeEvent("stalled")
+        event.send.side_effect = stalled_send
+        request = asyncio.create_task(self.plugin.alias(event, "saved"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            shutdown = asyncio.create_task(self.plugin.terminate())
+            await asyncio.wait_for(asyncio.gather(request, shutdown), 2)
+        finally:
+            for task in list(self.plugin.inflight.values()):
+                task.cancel()
+            await asyncio.gather(*self.plugin.inflight.values(), return_exceptions=True)
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(self.plugin.inflight)
+        self.assertFalse(self.plugin.active_users)
+        event.send.assert_awaited_once()  # 结果未知时不能再次发送。
+        receipt = await self.plugin.db.delivery(self.module.message_key(event, "aiocqhttp"))
+        self.assertFalse(receipt["done"])
+        user = await self.plugin.db.identify("aiocqhttp", "10001", "20001", "")
+        self.assertEqual(user["alias"], "saved")
+
+    async def test_native_notices_have_a_send_timeout(self):
+        self.plugin.settings = replace(self.plugin.settings, request_timeout=0.02)
+
+        async def stalled_send(*args):
+            await asyncio.Event().wait()
+
+        for group in ("", "20001"):
+            with self.subTest(group=group):
+                event = NativeEvent(group=group)
+                event.send.side_effect = stalled_send
+                action = (
+                    self.plugin.draw(event) if not group else self.plugin._failure(event, "error")
+                )
+                await asyncio.wait_for(action, 1)
+                event.send.assert_awaited_once()
+
+    async def test_expired_native_request_does_not_start_sending(self):
+        await self.plugin.initialize()
+        event = NativeEvent("expired")
+        original = self.plugin.db.set_alias
+        clock = Mock(return_value=0)
+
+        async def slow_alias(*args):
+            await original(*args)
+            clock.return_value = self.module.REQUEST_TIMEOUT + 1
+
+        self.plugin.db.set_alias = slow_alias
+        with patch.object(self.module, "time", SimpleNamespace(monotonic=clock)):
+            await self.plugin.alias(event, "saved")
+        event.send.assert_not_awaited()
+        receipt = await self.plugin.db.delivery(self.module.message_key(event, "aiocqhttp"))
+        self.assertFalse(receipt["done"])
+
     async def test_cleanup_runs_independently_after_backup_failure(self):
         self.plugin.db.backup = AsyncMock(side_effect=OSError("backup disk unavailable"))
         self.plugin.db.prune_cache = AsyncMock()
@@ -449,6 +515,44 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         payload = self.plugin.transport.request.await_args.args[1]
         self.assertEqual(payload["msg_type"], 0)
         self.assertEqual(payload["content"], "TLS/SSL 证书校验失败")
+
+    async def test_material_usage_command_reports_and_respects_switch(self):
+        from dataclasses import replace
+
+        self.assertTrue(self.plugin.material_usage.admin_only)
+        self.plugin.transport.material = AsyncMock(
+            return_value={
+                "images": [{"image_id": "a", "file_name": "piggy-a.png", "created_at": 0}],
+                "next_cursor": "",
+                "total": 3,
+            }
+        )
+        await self.plugin.material_usage(OfficialEvent("material-1"))
+        payload = self.plugin.transport.request.await_args.args[1]
+        self.assertEqual(payload["msg_type"], 0)
+        self.assertIn("QQ 素材库占用：3/100", payload["content"])
+        self.assertIn("本插件：1 张", payload["content"])
+        self.assertIn("其他插件或手动上传：2 张", payload["content"])
+
+        await self.plugin.material_usage(OfficialEvent("material-purge"), "删除缓存")
+        self.assertIn(
+            "已清理本插件的素材：删除 1 张",
+            self.plugin.transport.request.await_args.args[1]["content"],
+        )
+        deletes = [
+            c for c in self.plugin.transport.material.await_args_list if c.args[1] == "DELETE"
+        ]
+        self.assertEqual(deletes[-1].args[2], "/v2/media-images/a/delete")
+        await self.plugin.material_usage(OfficialEvent("material-bad"), "随便")
+        self.assertIn("用法", self.plugin.transport.request.await_args.args[1]["content"])
+
+        self.plugin.settings = replace(self.plugin.settings, material_usage_command=False)
+        self.plugin.transport.request.reset_mock()
+        event = OfficialEvent("material-2")
+        await self.plugin.material_usage(event)
+        # 开关关闭时不回复，也不拦截事件。
+        self.assertFalse(event.stopped)
+        self.plugin.transport.request.assert_not_awaited()
 
     async def test_reload_backup_admin_declarations_and_missing_manifest_preserves_catalog(self):
         await self.plugin.initialize()

@@ -1,9 +1,11 @@
+import asyncio
 import base64
 import copy
 import hashlib
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -161,7 +163,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 transport = FakeTransport([QQError(40034141, 400)])
                 sender = Sender(config, self.db, None, transport, logger=logger)
                 self.event.message_obj.message_id = f"budget-{index}"
-                # Fixed clock keeps the request alive but leaves no time for its next retry.
+                # 固定时钟让请求保持有效，但不留出下一次重试的时间。
                 with patch("core.delivery.time", SimpleNamespace(monotonic=lambda: 100)):
                     with self.assertRaises(QQError):
                         await sender.send(self.event, "app", Message("text"), deadline=105)
@@ -229,6 +231,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await sender.send(event, "app", self.message)
             self.assertEqual(len(transport.payloads), 1)
 
+    async def test_material_switch_does_not_invalidate_host_cache(self):
+        config = settings()
+        host = FakeHost()
+        url = await ImagePublisher(config, self.db, host).publish(self.path)
+        toggled = replace(config, material_usage_command=False)
+        self.assertEqual(await ImagePublisher(toggled, self.db, host).publish(self.path), url)
+        self.assertEqual(len(host.calls), 1)
+
     async def test_upload_budget_cache_expiry_and_provider_changes(self):
         config = settings(upload_retry_count=2)
         host = FakeHost([UploadError("temporary", True), UploadError("temporary", True)])
@@ -262,6 +272,17 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HttpAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_timeout_is_retryable(self):
+        host = self.host()
+        host.session = Mock()
+        host.session.close = AsyncMock()
+        response = AsyncMock()
+        response.__aenter__.side_effect = asyncio.TimeoutError
+        host.session.post.return_value = response
+        with self.assertRaises(UploadError) as error:
+            await host.upload(b"image", "pig.png", "image/png")
+        self.assertTrue(error.exception.retryable)
+
     async def asyncSetUp(self):
         self.received = []
         app = web.Application()
@@ -422,7 +443,7 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
         port = site._server.sockets[0].getsockname()[1]
         host = S3Host(settings(endpoint=f"http://127.0.0.1:{port}"))
         try:
-            # Local protocol fixture only; production Settings.check_host requires HTTPS.
+            # 仅用于本地协议测试；正式环境的 Settings.check_host 要求 HTTPS。
             with patch.dict("os.environ", {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
                 with self.assertRaises(UploadError) as raised:
                     await host.upload(b"image", "piggy/a.png", "image/png")
@@ -524,6 +545,22 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
 
 
 class RawQQResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_timeout_is_uncertain_and_retryable(self):
+        transport = QQTransport(20)
+        transport.session = Mock()
+        response = AsyncMock()
+        response.__aenter__.side_effect = asyncio.TimeoutError
+        transport.session.post.return_value = response
+        http = SimpleNamespace(check_session=AsyncMock(), is_sandbox=False, _headers={})
+        event = SimpleNamespace(
+            bot=SimpleNamespace(api=SimpleNamespace(_http=http)),
+            get_group_id=lambda: "group",
+        )
+        with self.assertRaises(QQError) as error:
+            await transport.request(event, {"msg_type": 2})
+        self.assertTrue(error.exception.uncertain)
+        self.assertTrue(error.exception.retryable)
+
     async def test_chunked_json_and_response_limit(self):
         async def chunks(size):
             for piece in [b'{"data":', b'{"url":', b'"https://images.example.com/pig.png"}}']:

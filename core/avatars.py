@@ -1,4 +1,4 @@
-"""Bounded, in-memory QQ avatar cache for official openids and OneBot QQ numbers."""
+"""有容量上限的内存 QQ 头像缓存，支持官机 openid 和 OneBot QQ 号。"""
 
 import asyncio
 import io
@@ -51,6 +51,7 @@ class Avatars:
                         data = await asyncio.to_thread(self.normalize, bytes(body))
             except (
                 aiohttp.ClientError,
+                asyncio.TimeoutError,
                 TimeoutError,
                 ValueError,
                 OSError,

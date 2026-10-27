@@ -13,7 +13,7 @@ def initialize_catalog(data_dir: Path, resources: Path) -> None:
     target = data_dir / "catalog"
     target.mkdir(parents=True, exist_ok=True)
     if not (target / "pigs.json").exists():
-        # The manifest is the completion marker, copied only after the images.
+        # 清单文件作为完成标记，只在图片全部复制完成后写入。
         images = target / "images"
         images.mkdir(exist_ok=True)
         definitions = json.loads((resources / "pigs.json").read_text("utf-8"))
@@ -74,13 +74,13 @@ def read_catalog(data_dir: Path) -> list[dict]:
             with Image.open(io.BytesIO(raw)) as img:
                 if suffix not in {".png", ".jpg", ".jpeg", ".webp"} or img.format not in formats:
                     raise ValueError("Unsupported image format")
-                # Some older bundled .png files actually contain WebP. Preserve them
-                # while giving archived assets the correct suffix and upload MIME type.
+                # 部分旧版内置 .png 文件实际是 WebP。保留原文件，
+                # 同时为归档素材使用正确的后缀和上传 MIME 类型。
                 suffix = formats[img.format]
                 if img.width * img.height > 16_000_000:
                     raise ValueError("Image dimensions too large")
                 img.verify()
-            # verify() does not decode JPEG pixels. Validate the exact bytes we archive.
+            # verify() 不会解码 JPEG 像素，这里直接校验实际归档的字节。
             with Image.open(io.BytesIO(raw)) as img:
                 img.load()
             digest = hashlib.sha256(raw).hexdigest()
@@ -95,7 +95,7 @@ def read_catalog(data_dir: Path) -> list[dict]:
         validated.append(
             {
                 "id": pig_id,
-                "name": item["name"].strip(),
+                "name": " ".join(item["name"].split()),
                 "description": item["description"].strip(),
                 "analysis": item["analysis"].strip(),
                 "asset": asset_name,

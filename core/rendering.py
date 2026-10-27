@@ -11,8 +11,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
-# One sheet contains the entire initial catalog. Limits keep future expansions
-# below QQ's practical image size and the renderer's memory budget.
+# 一张图包含初始猪库的全部小猪。以下限制确保日后扩充时
+# 不超过 QQ 实际可用的图片尺寸和渲染器的内存预算。
 ATLAS_SHEET_SIZE = 192
 PEN_SHEET_SIZE = 96
 WIDTH = 1080
@@ -33,7 +33,7 @@ def _font_digest() -> str:
 
 
 def font_path(root: Path) -> Path:
-    """Expand the bundled font once into plugin data, preserving all glyphs and weights."""
+    """将内置字体一次性解压到插件数据目录，保留全部字形和字重。"""
     path = root / "fonts" / f"NotoSansSC-{_font_digest()}.ttf"
     with _FONT_LOCK:
         if not path.is_file():
@@ -58,7 +58,7 @@ class Card:
 def render_collection(
     root: Path, name: str, progress: dict, entries: list[dict], page: int, pages: int, atlas: bool
 ) -> Card:
-    """Render the approved cream card; atlas tiles deliberately contain no names."""
+    """渲染奶油色图鉴卡片；图鉴格子有意不显示名称。"""
     columns = 8 if atlas else 4
     step = 122 if atlas else 248
     top = 384 if atlas else 478
@@ -80,7 +80,8 @@ def render_collection(
 
     def text(value, x, y, size=24, color=TEXT, bold=False, width=None, center=False):
         face = font(size, bold)
-        value = str(value)
+        # 标签均为单行，包括历史猪库记录中的名称。
+        value = " ".join(str(value).splitlines())
         if width is not None and draw.textlength(value, font=face) > width:
             while value and draw.textlength(value + "…", font=face) > width:
                 value = value[:-1]
@@ -135,7 +136,7 @@ def render_collection(
             box_w, box_h = 96, 94
             cx, cy = x + 57, y + 55
             if locked:
-                # Do not open or draw the hidden asset, including its silhouette or embedded text.
+                # 不打开也不绘制未解锁的素材，包括其轮廓和图中文字。
                 face = font(62, True)
                 draw.text((cx, cy - 1), "?", font=face, fill="#565656", anchor="mm")
                 continue
@@ -179,7 +180,7 @@ def finish(image: Image.Image) -> Card:
 
 
 class Canvas:
-    """Small shared drawing helpers for the two new cream cards."""
+    """两张新版奶油色卡片共用的绘制辅助方法。"""
 
     def __init__(self, root: Path, width: int, height: int):
         self.image = Image.new("RGB", (width, height), BG)
@@ -195,7 +196,8 @@ class Canvas:
         return self.fonts[size, bold]
 
     def text(self, text, x, y, size=26, color=TEXT, bold=False, width=None, anchor="la"):
-        text = str(text)
+        # 每日快照中仍可能包含规范化之前收录的名称。
+        text = " ".join(str(text).splitlines())
         face = self.font(size, bold)
         if width is not None and self.draw.textlength(text, font=face) > width:
             while text and self.draw.textlength(text + "…", font=face) > width:
@@ -235,9 +237,9 @@ def render_today(
 
     canvas.draw.rounded_rectangle((56, 180, 1024, 780), radius=32, fill="#ffffff")
     with Image.open(root / "assets" / pig["asset"]) as original:
-        # Most assets are 240px; scale the whole canvas so intentionally tiny pigs stay tiny.
+        # 多数素材为 240px；按整张画布缩放，让刻意画小的小猪保持小尺寸。
         art = ImageOps.contain(original.convert("RGBA"), (400, 400), Image.Resampling.LANCZOS)
-    # Round the corners of opaque full-bleed paintings; transparent art is unaffected.
+    # 为不透明的满版画作切圆角；透明素材不受影响。
     mask = Image.new("L", art.size)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, *art.size), radius=28, fill=255)
     mask = ImageChops.multiply(mask, art.getchannel("A"))
@@ -278,7 +280,7 @@ def render_today(
 
 
 def render_ranking(root: Path, boards: dict, avatars: dict[str, bytes]) -> Card:
-    """Both top tens in one sheet; nickname and avatar share a pill."""
+    """两个前十榜单放在同一张图中；昵称和头像共用一个胶囊框。"""
     rows = max(1, *(len(boards[k][:10]) for k in ("species", "total")))
     canvas = Canvas(root, 1488, 312 + rows * 105 + 92)
     canvas.text("PIGGY  /  LEADERBOARD", 56, 34, 18, ACCENT, True)
@@ -332,7 +334,7 @@ def render_ranking(root: Path, boards: dict, avatars: dict[str, bytes]) -> Card:
 
 
 def clean_cards(root: Path):
-    """Discard only reproducible UI images that have not been used for a week."""
+    """仅清理一周未使用、且可以重新生成的界面图片。"""
     threshold = time.time() - 7 * 86400
     for directory, suffix in (("cards", "*.png"), ("cards", "*.tmp"), ("thumbnails", "*.png")):
         for path in (root / directory).glob(suffix):

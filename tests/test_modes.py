@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import os
@@ -256,6 +257,16 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
             await avatars.get("app", str(i))
         self.assertEqual(len(avatars.cache), 256)
         self.assertNotIn(("app", "member"), avatars.cache)
+
+    async def test_avatar_total_timeout_falls_back_and_is_cached(self):
+        avatars = Avatars()
+        avatars.session = Mock()
+        response = AsyncMock()
+        response.__aenter__.side_effect = asyncio.TimeoutError
+        avatars.session.get.return_value = response
+        self.assertEqual(await avatars.get_many("app", [{"open_id": "member"}]), {})
+        self.assertIsNone(await avatars.get("app", "member"))
+        self.assertEqual(avatars.session.get.call_count, 1)
 
 
 class CacheAndConfigTests(unittest.TestCase):
