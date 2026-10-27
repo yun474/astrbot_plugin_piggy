@@ -113,7 +113,7 @@ class QQTransport:
                 if not isinstance(data.get(expected), str) or not data[expected]:
                     raise QQError(0, response.status, uncertain=True)
                 return data
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
             raise QQError(0, 0, uncertain=True) from None
 
     async def close(self):

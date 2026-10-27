@@ -100,7 +100,7 @@ class PiggyPlugin(Star):
         if not event.get_group_id() or (
             official and not isinstance(event.message_obj.raw_message, GroupMessage)
         ):
-            await event.send(event.plain_result("今日小猪收集版请在群聊中使用。"))
+            await self._send_native(event, event.plain_result("今日小猪收集版请在群聊中使用。"))
             return
         event.stop_event()
         if self.stopping:
@@ -110,7 +110,7 @@ class PiggyPlugin(Star):
             str(event.bot.api._http._token.app_id or "") if official else event.get_platform_id()
         )
         if not app_id or not event.message_obj.message_id:
-            await event.send(event.plain_result("未取得消息标识，暂时无法处理收藏。"))
+            await self._send_native(event, event.plain_result("未取得消息标识，暂时无法处理收藏。"))
             return
         key = message_key(event, app_id)
         if key in self.inflight:
@@ -253,8 +253,8 @@ class PiggyPlugin(Star):
             else:
                 chain = [Plain(message.text)] if message.text else []
                 chain += [Image.fromBytes(image) for image in message.images]
-                await event.send(event.chain_result(chain))
-                await self.db.delivery_update(key, receipt["sequence"], True)
+                if await self._send_native(event, event.chain_result(chain), deadline):
+                    await self.db.delivery_update(key, receipt["sequence"], True)
         except PiggyError as exc:
             if isinstance(exc, UploadError):
                 logger.warning(
@@ -283,19 +283,38 @@ class PiggyPlugin(Star):
             )
             await self._failure(event, "处理暂时失败，请联系管理员查看插件日志。")
 
+    async def _send_native(self, event, message, deadline: float | None = None) -> bool:
+        timeout = self.settings.request_timeout
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            logger.warning("[piggy] Native reply deadline expired before sending.")
+            return False
+        try:
+            await asyncio.wait_for(event.send(message), timeout)
+        except asyncio.TimeoutError:
+            # Delivery may already have succeeded. Keep the receipt unfinished and
+            # do not send another notice or retry automatically.
+            logger.warning("[piggy] Native send timed out; delivery is unconfirmed.")
+            return False
+        return True
+
     async def _failure(self, event, text: str):
         try:
             if not isinstance(event, QQOfficialMessageEvent):
-                await event.send(event.plain_result(text))
+                await self._send_native(event, event.plain_result(text))
                 return
-            await self.transport.request(
-                event,
-                {
-                    "msg_type": 0,
-                    "content": text,
-                    "msg_id": event.message_obj.message_id,
-                    "msg_seq": 9999,
-                },
+            await asyncio.wait_for(
+                self.transport.request(
+                    event,
+                    {
+                        "msg_type": 0,
+                        "content": text,
+                        "msg_id": event.message_obj.message_id,
+                        "msg_seq": 9999,
+                    },
+                ),
+                self.settings.request_timeout,
             )
         except Exception as exc:
             logger.warning("[piggy] Could not send failure notice (%s).", type(exc).__name__)

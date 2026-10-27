@@ -95,7 +95,7 @@ def read_catalog(data_dir: Path) -> list[dict]:
         validated.append(
             {
                 "id": pig_id,
-                "name": item["name"].strip(),
+                "name": " ".join(item["name"].split()),
                 "description": item["description"].strip(),
                 "analysis": item["analysis"].strip(),
                 "asset": asset_name,

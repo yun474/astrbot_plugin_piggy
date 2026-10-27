@@ -263,7 +263,7 @@ class HttpHost:
                 if not isinstance(url, str):
                     raise ValueError("URL is not a string")
                 return https_url(url)
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
             raise UploadError("图床连接超时或中断。", True) from None
         except (ValueError, KeyError, IndexError, TypeError):
             raise UploadError("图床没有返回配置的图片直链，请检查 JSON 响应路径。") from None

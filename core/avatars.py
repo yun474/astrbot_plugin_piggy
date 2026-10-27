@@ -51,6 +51,7 @@ class Avatars:
                         data = await asyncio.to_thread(self.normalize, bytes(body))
             except (
                 aiohttp.ClientError,
+                asyncio.TimeoutError,
                 TimeoutError,
                 ValueError,
                 OSError,

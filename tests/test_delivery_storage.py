@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import copy
 import hashlib
@@ -262,6 +263,17 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HttpAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_timeout_is_retryable(self):
+        host = self.host()
+        host.session = Mock()
+        host.session.close = AsyncMock()
+        response = AsyncMock()
+        response.__aenter__.side_effect = asyncio.TimeoutError
+        host.session.post.return_value = response
+        with self.assertRaises(UploadError) as error:
+            await host.upload(b"image", "pig.png", "image/png")
+        self.assertTrue(error.exception.retryable)
+
     async def asyncSetUp(self):
         self.received = []
         app = web.Application()
@@ -524,6 +536,22 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
 
 
 class RawQQResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_timeout_is_uncertain_and_retryable(self):
+        transport = QQTransport(20)
+        transport.session = Mock()
+        response = AsyncMock()
+        response.__aenter__.side_effect = asyncio.TimeoutError
+        transport.session.post.return_value = response
+        http = SimpleNamespace(check_session=AsyncMock(), is_sandbox=False, _headers={})
+        event = SimpleNamespace(
+            bot=SimpleNamespace(api=SimpleNamespace(_http=http)),
+            get_group_id=lambda: "group",
+        )
+        with self.assertRaises(QQError) as error:
+            await transport.request(event, {"msg_type": 2})
+        self.assertTrue(error.exception.uncertain)
+        self.assertTrue(error.exception.retryable)
+
     async def test_chunked_json_and_response_limit(self):
         async def chunks(size):
             for piece in [b'{"data":', b'{"url":', b'"https://images.example.com/pig.png"}}']:

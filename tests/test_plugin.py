@@ -419,6 +419,72 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         event.send.assert_awaited_once_with(("plain", "今日小猪收集版请在群聊中使用。"))
         self.plugin.transport.request.assert_not_awaited()
 
+    async def test_native_send_timeout_releases_worker_and_allows_shutdown(self):
+        self.plugin.settings = replace(self.plugin.settings, request_timeout=0.05)
+        self.plugin.db.backup = AsyncMock()
+        await self.plugin.initialize()
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def stalled_send(*args):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        event = NativeEvent("stalled")
+        event.send.side_effect = stalled_send
+        request = asyncio.create_task(self.plugin.alias(event, "saved"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            shutdown = asyncio.create_task(self.plugin.terminate())
+            await asyncio.wait_for(asyncio.gather(request, shutdown), 2)
+        finally:
+            for task in list(self.plugin.inflight.values()):
+                task.cancel()
+            await asyncio.gather(*self.plugin.inflight.values(), return_exceptions=True)
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(self.plugin.inflight)
+        self.assertFalse(self.plugin.active_users)
+        event.send.assert_awaited_once()  # Unknown delivery must not trigger another send.
+        receipt = await self.plugin.db.delivery(self.module.message_key(event, "aiocqhttp"))
+        self.assertFalse(receipt["done"])
+        user = await self.plugin.db.identify("aiocqhttp", "10001", "20001", "")
+        self.assertEqual(user["alias"], "saved")
+
+    async def test_native_notices_have_a_send_timeout(self):
+        self.plugin.settings = replace(self.plugin.settings, request_timeout=0.02)
+
+        async def stalled_send(*args):
+            await asyncio.Event().wait()
+
+        for group in ("", "20001"):
+            with self.subTest(group=group):
+                event = NativeEvent(group=group)
+                event.send.side_effect = stalled_send
+                action = (
+                    self.plugin.draw(event) if not group else self.plugin._failure(event, "error")
+                )
+                await asyncio.wait_for(action, 1)
+                event.send.assert_awaited_once()
+
+    async def test_expired_native_request_does_not_start_sending(self):
+        await self.plugin.initialize()
+        event = NativeEvent("expired")
+        original = self.plugin.db.set_alias
+        clock = Mock(return_value=0)
+
+        async def slow_alias(*args):
+            await original(*args)
+            clock.return_value = self.module.REQUEST_TIMEOUT + 1
+
+        self.plugin.db.set_alias = slow_alias
+        with patch.object(self.module, "time", SimpleNamespace(monotonic=clock)):
+            await self.plugin.alias(event, "saved")
+        event.send.assert_not_awaited()
+        receipt = await self.plugin.db.delivery(self.module.message_key(event, "aiocqhttp"))
+        self.assertFalse(receipt["done"])
+
     async def test_cleanup_runs_independently_after_backup_failure(self):
         self.plugin.db.backup = AsyncMock(side_effect=OSError("backup disk unavailable"))
         self.plugin.db.prune_cache = AsyncMock()

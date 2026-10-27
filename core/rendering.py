@@ -80,7 +80,8 @@ def render_collection(
 
     def text(value, x, y, size=24, color=TEXT, bold=False, width=None, center=False):
         face = font(size, bold)
-        value = str(value)
+        # Labels are single-line, including names in historical catalog records.
+        value = " ".join(str(value).splitlines())
         if width is not None and draw.textlength(value, font=face) > width:
             while value and draw.textlength(value + "…", font=face) > width:
                 value = value[:-1]
@@ -195,7 +196,8 @@ class Canvas:
         return self.fonts[size, bold]
 
     def text(self, text, x, y, size=26, color=TEXT, bold=False, width=None, anchor="la"):
-        text = str(text)
+        # Daily snapshots can still contain names accepted before normalization.
+        text = " ".join(str(text).splitlines())
         face = self.font(size, bold)
         if width is not None and self.draw.textlength(text, font=face) > width:
             while text and self.draw.textlength(text + "…", font=face) > width:

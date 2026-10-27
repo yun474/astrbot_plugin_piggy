@@ -264,6 +264,24 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PiggyError):
             read_catalog(self.root)
 
+    async def test_multiline_names_are_normalized_and_old_snapshots_still_render(self):
+        definitions = json.loads(self.manifest.read_text("utf-8"))[:1]
+        definitions[0]["name"] = "第一行\n第二行\r\n第三行"
+        self.manifest.write_text(json.dumps(definitions), "utf-8")
+        pigs = read_catalog(self.root)
+        self.assertEqual(pigs[0]["name"], "第一行 第二行 第三行")
+        # Simulate an accepted catalog and daily snapshot from before this fix.
+        pigs[0]["name"] = definitions[0]["name"]
+        await self.db.catalog(pigs)
+        result = await self.db.draw(self.user["id"], "group-a", "event")
+        progress = await self.db.collection(self.user["id"])
+        config = Settings(display={"draw": False, "pen": False})
+        today = today_message(config, self.root, self.user, result, progress)
+        pen = await collection_message(config, self.root, self.user, progress, 1, False)
+        for message in (today, pen):
+            with Image.open(io.BytesIO(message.images[0])) as image:
+                image.verify()
+
     async def test_corrupt_or_disguised_image_preserves_accepted_catalog(self):
         definitions = json.loads(self.manifest.read_text("utf-8"))
         asset_count = len(list((self.root / "assets").iterdir()))
