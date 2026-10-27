@@ -516,6 +516,44 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["msg_type"], 0)
         self.assertEqual(payload["content"], "TLS/SSL 证书校验失败")
 
+    async def test_material_usage_command_reports_and_respects_switch(self):
+        from dataclasses import replace
+
+        self.assertTrue(self.plugin.material_usage.admin_only)
+        self.plugin.transport.material = AsyncMock(
+            return_value={
+                "images": [{"image_id": "a", "file_name": "piggy-a.png", "created_at": 0}],
+                "next_cursor": "",
+                "total": 3,
+            }
+        )
+        await self.plugin.material_usage(OfficialEvent("material-1"))
+        payload = self.plugin.transport.request.await_args.args[1]
+        self.assertEqual(payload["msg_type"], 0)
+        self.assertIn("QQ 素材库占用：3/100", payload["content"])
+        self.assertIn("本插件：1 张", payload["content"])
+        self.assertIn("其他插件或手动上传：2 张", payload["content"])
+
+        await self.plugin.material_usage(OfficialEvent("material-purge"), "删除缓存")
+        self.assertIn(
+            "已清理本插件的素材：删除 1 张",
+            self.plugin.transport.request.await_args.args[1]["content"],
+        )
+        deletes = [
+            c for c in self.plugin.transport.material.await_args_list if c.args[1] == "DELETE"
+        ]
+        self.assertEqual(deletes[-1].args[2], "/v2/media-images/a/delete")
+        await self.plugin.material_usage(OfficialEvent("material-bad"), "随便")
+        self.assertIn("用法", self.plugin.transport.request.await_args.args[1]["content"])
+
+        self.plugin.settings = replace(self.plugin.settings, material_usage_command=False)
+        self.plugin.transport.request.reset_mock()
+        event = OfficialEvent("material-2")
+        await self.plugin.material_usage(event)
+        # 开关关闭时不回复，也不拦截事件。
+        self.assertFalse(event.stopped)
+        self.plugin.transport.request.assert_not_awaited()
+
     async def test_reload_backup_admin_declarations_and_missing_manifest_preserves_catalog(self):
         await self.plugin.initialize()
         self.assertTrue(self.plugin.reload.admin_only)

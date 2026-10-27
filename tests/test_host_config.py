@@ -18,11 +18,24 @@ def defaults(schema):
 
 
 class HostConfigTests(unittest.TestCase):
-    def test_fresh_schema_keeps_r2_default(self):
+    def test_fresh_schema_defaults_to_qq_material_without_parameters(self):
         config = defaults(SCHEMA)
         migrate_host_config(config)
-        self.assertEqual(config["image_host"]["provider"], "Cloudflare R2")
+        self.assertEqual(config["image_host"]["provider"], "QQ 素材库")
+        parsed = Settings.from_dict(config)
+        self.assertEqual(parsed.provider, "qq")
+        parsed.check_host()
+        config["image_host"]["provider"] = "Cloudflare R2"
         self.assertEqual(Settings.from_dict(config).region, "auto")
+
+    def test_saved_r2_choice_survives_new_default(self):
+        config = defaults(SCHEMA)
+        config["image_host_migrated"] = True
+        config["image_host"]["provider"] = "Cloudflare R2"
+        config["image_host"]["r2"]["secret_key"] = "saved-secret"
+        self.assertFalse(migrate_host_config(config))
+        parsed = Settings.from_dict(config)
+        self.assertEqual((parsed.provider, parsed.secret_key), ("s3", "saved-secret"))
 
     def test_legacy_defaults_migrate_once_without_losing_either_backend(self):
         config = defaults(SCHEMA)
@@ -98,6 +111,7 @@ class HostConfigTests(unittest.TestCase):
     def test_switching_preserves_settings_and_ignores_inactive_invalid_json(self):
         config = defaults(SCHEMA)
         host = config["image_host"]
+        host["provider"] = "Cloudflare R2"
         host["r2"].update(endpoint="https://r2.example.com", secret_key="r2-secret")
         host["http"]["upload_headers"] = "broken json"
         first = Settings.from_dict(config)
@@ -129,7 +143,32 @@ class HostConfigTests(unittest.TestCase):
                 if item.get("condition", {"provider": provider}) == {"provider": provider}
             ]
             self.assertEqual(len(visible), 2)
-        self.assertEqual(len(items["provider"]["options"]), 11)
+        self.assertEqual(len(items["provider"]["options"]), 12)
+        self.assertEqual(items["provider"]["default"], "QQ 素材库")
+        # 素材库说明分组紧跟类型选择，排在所有参数分组最前。
+        self.assertEqual(list(items)[:2], ["provider", "qq"])
+        self.assertTrue(items["qq"]["items"]["usage_command"]["default"])
+
+    def test_material_usage_switch_is_kept_across_providers_and_validated(self):
+        config = defaults(SCHEMA)
+        self.assertTrue(Settings.from_dict(config).material_usage_command)
+        config["image_host"]["qq"]["usage_command"] = False
+        self.assertFalse(Settings.from_dict(config).material_usage_command)
+        config["image_host"]["provider"] = "Cloudflare R2"
+        self.assertFalse(Settings.from_dict(config).material_usage_command)
+        config["image_host"]["qq"]["usage_command"] = "false"
+        with self.assertRaises(PiggyError):
+            Settings.from_dict(config)
+
+    def test_material_cache_minutes_default_and_range(self):
+        config = defaults(SCHEMA)
+        self.assertEqual(Settings.from_dict(config).material_cache_minutes, 0)
+        config["image_host"]["qq"]["cache_minutes"] = 1440
+        self.assertEqual(Settings.from_dict(config).material_cache_minutes, 1440)
+        for value in (-1, 1441, "60"):
+            config["image_host"]["qq"]["cache_minutes"] = value
+            with self.subTest(value=value), self.assertRaises(PiggyError):
+                Settings.from_dict(config)
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):

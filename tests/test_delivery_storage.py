@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -229,6 +230,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(QQError):
                 await sender.send(event, "app", self.message)
             self.assertEqual(len(transport.payloads), 1)
+
+    async def test_material_switch_does_not_invalidate_host_cache(self):
+        config = settings()
+        host = FakeHost()
+        url = await ImagePublisher(config, self.db, host).publish(self.path)
+        toggled = replace(config, material_usage_command=False)
+        self.assertEqual(await ImagePublisher(toggled, self.db, host).publish(self.path), url)
+        self.assertEqual(len(host.calls), 1)
 
     async def test_upload_budget_cache_expiry_and_provider_changes(self):
         config = settings(upload_retry_count=2)

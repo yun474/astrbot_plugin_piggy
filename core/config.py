@@ -33,6 +33,9 @@ HTTP_FIELDS = (
     "success_path",
     "success_value",
 )
+QQ_MATERIAL = "QQ 素材库"
+# 旧版配置首次补全 image_host 时，provider 只会是配置模板的默认值。
+DEFAULT_PROVIDERS = {"Cloudflare R2", QQ_MATERIAL}
 
 
 def migrate_host_config(data: dict) -> bool:
@@ -77,13 +80,16 @@ def migrate_host_config(data: dict) -> bool:
         r2 = host.get("r2", {})
         if not isinstance(r2, dict):
             raise PiggyError("图床 r2 配置必须为对象。")
-        if host.get("provider", "Cloudflare R2") == "Cloudflare R2" and all(
-            r2.get(key, value) == value for key, value in r2_defaults.items()
-        ):
-            old_provider = data.get("provider", "s3")
-            host["provider"] = {"s3": "其他 S3 兼容存储", "http": "自定义 HTTP"}.get(
-                old_provider, old_provider
-            )
+        provider = host.get("provider", "Cloudflare R2")
+        if provider in DEFAULT_PROVIDERS:
+            if all(r2.get(key, value) == value for key, value in r2_defaults.items()):
+                old_provider = data.get("provider", "s3")
+                host["provider"] = {"s3": "其他 S3 兼容存储", "http": "自定义 HTTP"}.get(
+                    old_provider, old_provider
+                )
+            else:
+                # 已填写的 R2 参数说明用户打算使用 R2，而不是新的默认素材库。
+                host["provider"] = "Cloudflare R2"
     for key in (*S3_FIELDS, *HTTP_FIELDS, "provider"):
         data.pop(key, None)
     data["image_host_migrated"] = True
@@ -145,6 +151,8 @@ class Settings:
     backup_keep: int = 7
     cache_ttl_hours: int = 168
     command_prefix: str = ""
+    material_usage_command: bool = True
+    material_cache_minutes: int = 0
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -156,7 +164,10 @@ class Settings:
             if not isinstance(host, dict):
                 raise PiggyError("图床配置必须为对象。")
             provider = host.get("provider", "Cloudflare R2")
-            if provider in S3_PROVIDERS:
+            if provider == QQ_MATERIAL:
+                # 素材库沿用 QQ 官机鉴权，没有需要填写的参数。
+                section, fields = "qq", ()
+            elif provider in S3_PROVIDERS:
                 section, region, style, signature = S3_PROVIDERS[provider]
                 fields = S3_FIELDS
             elif provider in {"自定义 HTTP", "兰空 Lsky Pro V2"}:
@@ -171,7 +182,17 @@ class Settings:
             for key in (*S3_FIELDS, *HTTP_FIELDS, "signature_version"):
                 values.pop(key, None)
             values.update({key: selected[key] for key in fields if key in selected})
-            values["provider"] = "s3" if provider in S3_PROVIDERS else "http"
+            values["provider"] = (
+                "qq" if section == "qq" else "s3" if provider in S3_PROVIDERS else "http"
+            )
+            # 占用查看指令与当前选用的图床无关，切换到其他图床后仍按已保存的开关处理。
+            material = host.get("qq", {})
+            if not isinstance(material, dict):
+                raise PiggyError("图床 qq 配置必须为对象。")
+            if "usage_command" in material:
+                values["material_usage_command"] = material["usage_command"]
+            if "cache_minutes" in material:
+                values["material_cache_minutes"] = material["cache_minutes"]
             if values["provider"] == "s3":
                 configured_region = selected.get("region", "")
                 values["region"] = (
@@ -217,6 +238,7 @@ class Settings:
             ("backup_keep", 1, 30),
             ("cache_ttl_hours", 1, 8760),
             ("temp_cache_hours", 1, 24),
+            ("material_cache_minutes", 0, 1440),
         ):
             value = getattr(obj, key)
             if type(value) is not int or not low <= value <= high:
@@ -228,8 +250,10 @@ class Settings:
             value = getattr(obj, key)
             if type(value) not in (int, float) or not low <= value <= high:
                 raise PiggyError(f"配置 {key} 必须在 {low}–{high} 之间。")
-        if obj.provider not in {"s3", "http"}:
-            raise PiggyError("图床 provider 仅支持 s3 或 http。")
+        if type(obj.material_usage_command) is not bool:
+            raise PiggyError("素材库占用查看指令开关必须为布尔值。")
+        if obj.provider not in {"s3", "http", "qq"}:
+            raise PiggyError("图床 provider 仅支持 s3、http 或 qq。")
         if obj.upload_mode not in {"multipart", "json_base64"}:
             raise PiggyError("HTTP 上传模式只能为 multipart 或 json_base64。")
         if obj.addressing_style not in {"path", "virtual", "auto"}:
@@ -250,6 +274,8 @@ class Settings:
         return self.display.get(command, command == "draw")
 
     def check_host(self) -> None:
+        if self.provider == "qq":
+            return
         if self.provider == "s3":
             missing = [
                 key

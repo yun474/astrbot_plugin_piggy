@@ -20,9 +20,16 @@ from .core.config import PiggyError, Settings, migrate_host_config
 from .core.database import Database
 from .core.delivery import Message, QQError, QQTransport, Sender, message_key
 from .core.diagnostics import exception_detail
+from .core.material import MaterialLibrary
 from .core.rendering import clean_cards
 from .core.storage import ImagePublisher, UploadError
-from .core.views import collection_message, ranking_message, today_message
+from .core.views import (
+    collection_message,
+    material_message,
+    purge_message,
+    ranking_message,
+    today_message,
+)
 
 MAX_INFLIGHT = 12
 REQUEST_TIMEOUT = 240
@@ -39,7 +46,15 @@ class PiggyPlugin(Star):
         self.db = Database(self.root)
         self.publisher = ImagePublisher(self.settings, self.db)
         self.transport = QQTransport(self.settings.request_timeout)
-        self.sender = Sender(self.settings, self.db, self.publisher, self.transport, logger=logger)
+        self.material = MaterialLibrary(self.settings, self.transport, logger=logger)
+        self.sender = Sender(
+            self.settings,
+            self.db,
+            self.publisher,
+            self.transport,
+            logger=logger,
+            material=self.material,
+        )
         self.avatars = Avatars()
         self.ready = False
         self.init_lock = asyncio.Lock()
@@ -236,6 +251,22 @@ class PiggyPlugin(Star):
                 async with self.maintenance_lock:
                     await self.db.backup(self.settings.backup_keep)
                 message = Message("备份已保存到插件数据目录 backups，包含数据库、猪库及历史素材。")
+            elif command == "material":
+                if not official:
+                    raise PiggyError("小猪素材库仅用于查看 QQ 官方机器人的素材库占用。")
+                action = args[0]
+                if action in {"删除", "删除缓存", "删除全部"}:
+                    result = await self.material.purge(
+                        event, app_id, deadline, everything=action == "删除全部"
+                    )
+                    message = purge_message(result, action == "删除全部")
+                elif action:
+                    raise PiggyError("用法：小猪素材库 [删除缓存|删除全部]")
+                else:
+                    usage = await self.material.usage(event, app_id, deadline)
+                    message = material_message(
+                        usage, self.settings.provider == "qq", self.settings.material_cache_minutes
+                    )
             else:
                 if not official:
                     raise PiggyError("小猪诊断仅用于检查 QQ 官方机器人的图片转存链路。")
@@ -362,6 +393,15 @@ class PiggyPlugin(Star):
         """仅管理员：绕过缓存上传测试猪图，发送消息并检查 QQ 图片转存链路。"""
         await self._handle(event, "diagnose")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("小猪素材库")
+    async def material_usage(self, event: AstrMessageEvent, action: str = ""):
+        """仅管理员：查看 QQ 素材库占用；附加「删除缓存」删除本插件素材，「删除全部」清空素材库。"""
+        # 开关关闭时不拦截事件，同名指令可交由其他插件处理。
+        if not self.settings.material_usage_command:
+            return
+        await self._handle(event, "material", (action,))
+
     async def terminate(self):
         self.stopping = True
         # 关闭客户端前等待正在运行的线程任务完成；排队中的任务直接跳过。
@@ -377,5 +417,6 @@ class PiggyPlugin(Star):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await self.publisher.close()
+        await self.material.close()
         await self.transport.close()
         await self.avatars.close()

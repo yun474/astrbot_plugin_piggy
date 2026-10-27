@@ -78,7 +78,8 @@ def today_message(
             if streak >= settings.duplicate_pity
             else f"重复保护 {streak}/{settings.duplicate_pity}"
         )
-    if not settings.use_host("draw"):
+
+    def local() -> Message:
         card = render_today(
             root,
             display_name(user),
@@ -88,6 +89,9 @@ def today_message(
             protection,
         )
         return Message("", (card.data,), local=True)
+
+    if not settings.use_host("draw"):
+        return local()
     description = "\n".join(
         f"> {line}" if line else ">"
         for line in md(f"{pig['description']}\n\n{pig['analysis']}").splitlines()
@@ -102,7 +106,12 @@ def today_message(
     )
     if protection:
         text += f"\n\n{protection}"
-    return Message(text, (root / "assets" / pig["asset"],), keyboard(settings, user["open_id"]))
+    return Message(
+        text,
+        (root / "assets" / pig["asset"],),
+        keyboard(settings, user["open_id"]),
+        fallback=local,
+    )
 
 
 async def collection_message(
@@ -137,4 +146,27 @@ def card_message(settings, user, card, title, command, page=1, pages=1):
         (card.data,),
         keyboard(settings, user["open_id"], title, page, pages) if hosted else None,
         local=not hosted,
+        fallback=(lambda: Message("", (card.data,), local=True)) if hosted else None,
     )
+
+
+def material_message(usage: dict, active: bool, cache_minutes: int) -> Message:
+    cleanup = "插件会定期自动清理" if active else "当前未选用 QQ 素材库，插件不会自动清理"
+    cache = f"{cache_minutes} 分钟" if cache_minutes else "即用即删"
+    return Message(
+        f"QQ 素材库占用：{usage['total']}/100\n"
+        f"本插件：{usage['ours']} 张，其中缓存中的猪图 {usage['cached']} 张（缓存时间：{cache}）\n"
+        f"超过 10 分钟的残留：{usage['stale']} 张，{cleanup}\n"
+        f"其他插件或手动上传：{usage['others']} 张\n"
+        "可发送「小猪素材库 删除缓存」或「小猪素材库 删除全部」清理。"
+    )
+
+
+def purge_message(result: dict, everything: bool) -> Message:
+    scope = "整个素材库（含其他插件的素材）" if everything else "本插件的素材"
+    text = f"已清理{scope}：删除 {result['deleted']} 张"
+    if result["skipped"]:
+        text += f"，跳过正在发送的 {result['skipped']} 张"
+    if result["failed"]:
+        text += f"，{result['failed']} 张删除失败，请稍后重试"
+    return Message(text + "。")

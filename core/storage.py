@@ -28,6 +28,14 @@ class UploadError(PiggyError):
         self.attempt = 1
 
 
+class MaterialUnavailable(PiggyError):
+    """QQ 素材库暂时无法使用（限流、额度已满或无权限），可改发本地卡片。"""
+
+    def __init__(self, message: str, *, full: bool = False):
+        super().__init__(message)
+        self.full = full
+
+
 class ImageHost(Protocol):
     async def upload(self, data: bytes, key: str, content_type: str) -> str: ...
     async def close(self) -> None: ...
@@ -280,6 +288,9 @@ class ImagePublisher:
         self.host = host or (S3Host(settings) if settings.provider == "s3" else HttpHost(settings))
         # 凭据只参与单向的缓存指纹计算，不会写入日志。
         config = asdict(settings)
+        # 素材库专属配置与图床无关，不能让切换配置或升级后的新字段使已有图床链接失效。
+        config.pop("material_usage_command", None)
+        config.pop("material_cache_minutes", None)
         self.namespace = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         self.lock = asyncio.Lock()
 
