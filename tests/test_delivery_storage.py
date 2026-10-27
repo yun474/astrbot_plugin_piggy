@@ -162,7 +162,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 transport = FakeTransport([QQError(40034141, 400)])
                 sender = Sender(config, self.db, None, transport, logger=logger)
                 self.event.message_obj.message_id = f"budget-{index}"
-                # Fixed clock keeps the request alive but leaves no time for its next retry.
+                # 固定时钟让请求保持有效，但不留出下一次重试的时间。
                 with patch("core.delivery.time", SimpleNamespace(monotonic=lambda: 100)):
                     with self.assertRaises(QQError):
                         await sender.send(self.event, "app", Message("text"), deadline=105)
@@ -434,7 +434,7 @@ class S3Tests(unittest.IsolatedAsyncioTestCase):
         port = site._server.sockets[0].getsockname()[1]
         host = S3Host(settings(endpoint=f"http://127.0.0.1:{port}"))
         try:
-            # Local protocol fixture only; production Settings.check_host requires HTTPS.
+            # 仅用于本地协议测试；正式环境的 Settings.check_host 要求 HTTPS。
             with patch.dict("os.environ", {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
                 with self.assertRaises(UploadError) as raised:
                     await host.upload(b"image", "piggy/a.png", "image/png")

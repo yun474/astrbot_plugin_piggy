@@ -105,7 +105,7 @@ class PiggyPlugin(Star):
         event.stop_event()
         if self.stopping:
             return
-        # Non-official platforms keep separate accounts per AstrBot platform instance.
+        # 非官机平台按 AstrBot 平台实例分别记录账号。
         app_id = (
             str(event.bot.api._http._token.app_id or "") if official else event.get_platform_id()
         )
@@ -118,7 +118,7 @@ class PiggyPlugin(Star):
             return
         owner = (app_id, event.get_sender_id())
         if owner in self.active_users or len(self.inflight) >= MAX_INFLIGHT:
-            # A burst must not create another unbounded queue of busy replies.
+            # 突发请求不能再堆积出无上限的繁忙提示队列。
             if self.busy_notice is None or self.busy_notice.done():
                 self.busy_notice = asyncio.create_task(
                     self._failure(event, "小猪正在处理请求，请等当前请求完成后再试。")
@@ -161,7 +161,7 @@ class PiggyPlugin(Star):
             if receipt["done"]:
                 return
             official = isinstance(event, QQOfficialMessageEvent)
-            # Markdown, keyboards and image hosts are QQ official features; others get cards.
+            # Markdown、按钮和图床是 QQ 官机功能；其他平台发送卡片图片。
             settings = (
                 self.settings
                 if official
@@ -210,7 +210,7 @@ class PiggyPlugin(Star):
                 if kind not in {"种类", "数量"}:
                     raise PiggyError("用法：小猪排行 种类/数量")
                 boards = await self.db.rankings(app_id, event.get_group_id())
-                # OneBot sender ids are QQ numbers; other platforms have no QQ avatar to fetch.
+                # OneBot 的发送者 ID 就是 QQ 号；其他平台没有可获取的 QQ 头像。
                 onebot = not official and event.get_platform_name() == "aiocqhttp"
                 avatars = (
                     await self.avatars.get_many(
@@ -293,8 +293,8 @@ class PiggyPlugin(Star):
         try:
             await asyncio.wait_for(event.send(message), timeout)
         except asyncio.TimeoutError:
-            # Delivery may already have succeeded. Keep the receipt unfinished and
-            # do not send another notice or retry automatically.
+            # 消息可能已经送达。保留未完成的发送记录，
+            # 不再发送通知，也不自动重试。
             logger.warning("[piggy] Native send timed out; delivery is unconfirmed.")
             return False
         return True
@@ -364,7 +364,7 @@ class PiggyPlugin(Star):
 
     async def terminate(self):
         self.stopping = True
-        # Drain active thread-backed work before closing clients; queued work skips execution.
+        # 关闭客户端前等待正在运行的线程任务完成；排队中的任务直接跳过。
         tasks = list(self.inflight.values())
         if self.busy_notice:
             tasks.append(self.busy_notice)

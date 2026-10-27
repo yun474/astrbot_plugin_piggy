@@ -45,7 +45,7 @@ class HostConfigTests(unittest.TestCase):
         self.assertFalse(migrate_host_config(config))
         config["image_host"]["provider"] = "自定义 HTTP"
         self.assertEqual(Settings.from_dict(config).upload_headers, {"Authorization": "Bearer old"})
-        # AstrBot may add the invisible legacy defaults again on the next load.
+        # AstrBot 下次加载时可能会再次补上隐藏的旧版默认值。
         config.update({k: v for k, v in defaults(SCHEMA).items() if k not in config})
         self.assertFalse(migrate_host_config(config))
         self.assertEqual(Settings.from_dict(config).provider, "http")

@@ -43,7 +43,7 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
             (4, 100, 100, False),
             (5, 0, 0, False),
         ):
-            # Keep exactly one of the two species owned for each boundary check.
+            # 每次边界检查时，两种小猪只保留其中一种已收藏。
             await self.db.run(
                 lambda c: c.execute(
                     "DELETE FROM collections WHERE user_id=? AND pig_id<>?",
@@ -270,7 +270,7 @@ class DomainTests(unittest.IsolatedAsyncioTestCase):
         self.manifest.write_text(json.dumps(definitions), "utf-8")
         pigs = read_catalog(self.root)
         self.assertEqual(pigs[0]["name"], "第一行 第二行 第三行")
-        # Simulate an accepted catalog and daily snapshot from before this fix.
+        # 模拟本次修复前已生效的猪库和每日快照。
         pigs[0]["name"] = definitions[0]["name"]
         await self.db.catalog(pigs)
         result = await self.db.draw(self.user["id"], "group-a", "event")

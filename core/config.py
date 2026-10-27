@@ -36,7 +36,7 @@ HTTP_FIELDS = (
 
 
 def migrate_host_config(data: dict) -> bool:
-    """Preserve both legacy backends once, including schema-filled defaults."""
+    """一次性保留两种旧版图床配置，包括由配置模板补全的默认值。"""
     if data.get("image_host_migrated", False):
         return False
     host = data.setdefault("image_host", {})
@@ -51,7 +51,7 @@ def migrate_host_config(data: dict) -> bool:
             try:
                 legacy_values[key] = json.loads(legacy_values[key])
             except ValueError:
-                pass  # Preserve malformed legacy input for normal settings validation.
+                pass  # 保留格式错误的旧配置，交给常规配置校验处理。
     legacy = any(value != getattr(defaults, key) for key, value in legacy_values.items())
     if legacy:
         for section, fields in (("s3", S3_FIELDS), ("http", HTTP_FIELDS)):
@@ -71,7 +71,7 @@ def migrate_host_config(data: dict) -> bool:
                     for key in ("upload_headers", "upload_fields", "success_value"):
                         if not isinstance(target[key], str):
                             target[key] = json.dumps(target[key], ensure_ascii=False)
-        # A previously saved new provider choice takes precedence over old fields.
+        # 已保存的新图床选择优先于旧字段。
         r2_defaults = {key: getattr(defaults, key) for key in S3_FIELDS}
         r2_defaults["addressing_style"] = "auto"
         r2 = host.get("r2", {})
@@ -91,7 +91,7 @@ def migrate_host_config(data: dict) -> bool:
 
 
 class PiggyError(Exception):
-    """An actionable error safe to show to the user."""
+    """可以安全展示给用户、并能指导处理的错误。"""
 
 
 def https_url(value: str) -> str:
@@ -167,7 +167,7 @@ class Settings:
             selected = host.get(section, {})
             if not isinstance(selected, dict):
                 raise PiggyError(f"图床 {section} 配置必须为对象。")
-            # Never leak credentials or options from an inactive backend.
+            # 不泄露未启用图床的凭据或选项。
             for key in (*S3_FIELDS, *HTTP_FIELDS, "signature_version"):
                 values.pop(key, None)
             values.update({key: selected[key] for key in fields if key in selected})

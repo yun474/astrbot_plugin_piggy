@@ -89,7 +89,7 @@ class S3Host:
                         response_checksum_validation="when_required",
                     ),
                 )
-            # No ACL: R2 does not implement x-amz-acl. Public access is bucket/domain configuration.
+            # 不设置 ACL：R2 不支持 x-amz-acl，公开访问由存储桶或域名配置决定。
             if not self.directories_ready:
                 for folder in (ASSET_PREFIX, TEMP_PREFIX):
                     stage = f"create_directory:{folder}"
@@ -196,7 +196,7 @@ class S3Host:
 
 
 def json_path(payload, path: str):
-    """Read dot-separated object keys or array indices without evaluating expressions."""
+    """按点分隔读取对象键或数组下标，不执行任何表达式。"""
     value = payload
     for part in path.split("."):
         if isinstance(value, list):
@@ -207,7 +207,7 @@ def json_path(payload, path: str):
 
 
 async def response_json(response):
-    """Read a complete, bounded response even when HTTP delivers JSON in small chunks."""
+    """即使 HTTP 分小块传输 JSON，也能完整读取有大小上限的响应。"""
     body = bytearray()
     async for chunk in response.content.iter_chunked(65536):
         body.extend(chunk)
@@ -278,7 +278,7 @@ class ImagePublisher:
         self.settings = settings
         self.db = db
         self.host = host or (S3Host(settings) if settings.provider == "s3" else HttpHost(settings))
-        # Credentials only participate in this one-way cache fingerprint and are never logged.
+        # 凭据只参与单向的缓存指纹计算，不会写入日志。
         config = asdict(settings)
         self.namespace = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         self.lock = asyncio.Lock()
@@ -298,7 +298,7 @@ class ImagePublisher:
         ttl = (
             self.settings.temp_cache_hours if temporary else self.settings.cache_ttl_hours
         ) * 3600
-        # Rotate temporary keys so an object approaching lifecycle expiry is never reused.
+        # 轮换临时对象键，避免复用即将因生命周期过期的对象。
         folder = f"temp/{int(time.time() // ttl)}" if temporary else "assets"
         namespace = f"{self.namespace}:v2:{folder}"
         async with self.lock:

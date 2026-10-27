@@ -14,7 +14,7 @@ from .diagnostics import safe_detail
 from .storage import ImagePublisher, response_json
 
 IMAGE_ERRORS = {304010, 40034004}
-# Retry forced-verification rejections without unnecessarily reuploading images.
+# 遇到强制校验拒绝时重试，避免不必要地重新上传图片。
 RETRYABLE_ERRORS = IMAGE_ERRORS | {40034141}
 EXPIRED_ERRORS = {304103, 40034005, 40034128}
 DEDUPE_ERRORS = {40054005}
@@ -45,7 +45,7 @@ class QQError(PiggyError):
 
 
 class QQTransport:
-    """Use AstrBot's token lifecycle, but retain QQ error codes discarded by botpy 1.2.1."""
+    """沿用 AstrBot 的 token 生命周期，同时保留 botpy 1.2.1 丢弃的 QQ 错误码。"""
 
     def __init__(self, timeout: float):
         self.timeout = timeout
@@ -239,7 +239,7 @@ class Sender:
                 await self.transport.request(event, payload)
             except QQError as exc:
                 if exc.code in DEDUPE_ERRORS:
-                    # Same persisted sequence: a previous attempt already reached QQ.
+                    # 已保存的序号相同，说明之前的尝试已经送达 QQ。
                     await self.db.delivery_update(key, sequence, True)
                     return
                 image_error = exc.code in IMAGE_ERRORS or (message.local and exc.code == 304080)
@@ -250,7 +250,7 @@ class Sender:
                 if not retryable:
                     raise
                 if not exc.uncertain:
-                    # QQ explicitly rejected this message. It is safe to allocate the next sequence.
+                    # QQ 明确拒绝了这条消息，可以安全分配下一个序号。
                     sequence += 1
                     await self.db.delivery_update(key, sequence, False)
                 if delay is None:
@@ -259,7 +259,7 @@ class Sender:
                 if image_error and message.local:
                     media = await self._upload_local(event, message.images[0], deadline)
                 elif image_error and not refreshed:
-                    # Repair expired/deleted host objects once per message, then let QQ retry transfer.
+                    # 每条消息只修复一次过期或被删除的图床对象，然后让 QQ 重新转存。
                     urls = [
                         await self.publisher.publish(path, force=True, deadline=deadline)
                         for path in message.images

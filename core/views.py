@@ -108,7 +108,7 @@ def today_message(
 async def collection_message(
     settings: Settings, root: Path, user: dict, progress: dict, page: int, atlas: bool
 ) -> Message:
-    """The same in-memory cream card serves both delivery modes."""
+    """两种发送模式共用同一张内存中的奶油色卡片。"""
     title = "小猪图鉴" if atlas else "我的猪圈"
     items = (
         [p for p in progress["entries"] if p["enabled"]]

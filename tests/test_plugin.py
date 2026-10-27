@@ -58,7 +58,7 @@ class OfficialEvent:
 
 
 class NativeEvent:
-    """A non-official AstrBot event, e.g. aiocqhttp."""
+    """非官机的 AstrBot 事件，例如 aiocqhttp。"""
 
     def __init__(self, message_id="native", user="10001", group="20001"):
         self.group, self.user = group, user
@@ -109,7 +109,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             await self.plugin.limit.acquire()
 
-        # Use an async side effect so the sole overload notice stays in flight.
+        # 使用异步副作用，让唯一一条过载提示保持发送中。
         async def busy(*args):
             await release.wait()
 
@@ -446,7 +446,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
         self.assertFalse(self.plugin.inflight)
         self.assertFalse(self.plugin.active_users)
-        event.send.assert_awaited_once()  # Unknown delivery must not trigger another send.
+        event.send.assert_awaited_once()  # 结果未知时不能再次发送。
         receipt = await self.plugin.db.delivery(self.module.message_key(event, "aiocqhttp"))
         self.assertFalse(receipt["done"])
         user = await self.plugin.db.identify("aiocqhttp", "10001", "20001", "")
