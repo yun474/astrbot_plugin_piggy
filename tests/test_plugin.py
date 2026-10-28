@@ -213,9 +213,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
             return decorate
 
-        def permission(value):
+        def permission(value, raise_error=True):
             def decorate(function):
                 function.admin_only = True
+                function.permission_raise_error = raise_error
                 return function
 
             return decorate
@@ -515,6 +516,36 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         payload = self.plugin.transport.request.await_args.args[1]
         self.assertEqual(payload["msg_type"], 0)
         self.assertEqual(payload["content"], "TLS/SSL 证书校验失败")
+
+    async def test_material_command_permission_gate_preserves_other_handlers(self):
+        self.plugin._handle = AsyncMock()
+        handler = self.plugin.material_usage
+        for enabled in (False, True):
+            self.plugin.settings = replace(self.plugin.settings, material_usage_command=enabled)
+            for admin in (False, True):
+                with self.subTest(enabled=enabled, admin=admin):
+                    event = OfficialEvent()
+                    self.plugin._handle.reset_mock()
+                    # 模拟 AstrBot 在调用处理器前执行权限过滤；拒绝时是否停止由装饰器决定。
+                    if handler.admin_only and not admin:
+                        if handler.permission_raise_error:
+                            await event.send("权限不足")
+                            event.stop_event()
+                    else:
+                        await handler(event, "删除全部")
+                    event.send.assert_not_awaited()
+                    self.assertFalse(event.stopped)
+                    if enabled and admin:
+                        self.plugin._handle.assert_awaited_once_with(
+                            event, "material", ("删除全部",)
+                        )
+                    else:
+                        self.plugin._handle.assert_not_awaited()
+                        # 未启用或无权限时，后续同名处理器仍有机会接收事件。
+                        following_handler = AsyncMock()
+                        if not event.stopped:
+                            await following_handler(event)
+                        following_handler.assert_awaited_once_with(event)
 
     async def test_material_usage_command_reports_and_respects_switch(self):
         from dataclasses import replace

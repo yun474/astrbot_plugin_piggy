@@ -393,7 +393,8 @@ class PiggyPlugin(Star):
         """仅管理员：绕过缓存上传测试猪图，发送消息并检查 QQ 图片转存链路。"""
         await self._handle(event, "diagnose")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    # 权限检查先于函数内开关执行；静默跳过非管理员，避免关闭后仍吞掉同名指令。
+    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
     @filter.command("小猪素材库")
     async def material_usage(self, event: AstrMessageEvent, action: str = ""):
         """仅管理员：查看 QQ 素材库占用；附加「删除缓存」删除本插件素材，「删除全部」清空素材库。"""
